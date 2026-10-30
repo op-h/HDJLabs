@@ -3,6 +3,7 @@ pub mod guides;
 pub mod player;
 pub mod rtl;
 pub mod studio;
+pub mod text_field;
 pub mod theme;
 pub mod web;
 #[cfg(debug_assertions)]
@@ -30,6 +31,7 @@ impl<T: Root> eframe::App for GlApp<T> {
         if let Some((x, y)) = std::env::var("HDJLABS_SHOT_POINTER").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)))) {
             raw.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
         }
+        shot::scripted_input(raw);
     }
 }
 

@@ -99,7 +99,7 @@ pub fn grade_code(q: &Question, a: &Answer) -> QuestionResult {
     if source.trim().is_empty() || source.trim() == spec.starter.trim() {
         return result(q, 0.0, Status::Unanswered);
     }
-    if spec.tests.is_empty() || spec.lang.is_preview_only() {
+    if spec.teacher_graded() {
         return result(q, 0.0, Status::Review);
     }
     let outcomes = run_tests(spec, *lang, source, true);
@@ -228,6 +228,19 @@ mod tests {
         assert!(exam.validate().iter().any(|e| e.contains("lockdown")), "a locked exam must refuse uploads");
         exam.settings.lockdown = false;
         assert!(!exam.validate().iter().any(|e| e.contains("lockdown")));
+    }
+
+    #[test]
+    fn code_without_expected_output_waits_for_the_teacher() {
+        let mut spec = CodeSpec::new(Lang::Python);
+        assert!(spec.teacher_graded(), "a new question has no expected output yet");
+        let code = q(Kind::Code(spec.clone()));
+        let answer = Answer::Code { lang: Lang::Python, source: "print(42)".into() };
+        assert_eq!(grade_code(&code, &answer).status, Status::Review);
+        spec.tests[0].expected = "42".into();
+        assert!(!spec.teacher_graded());
+        spec.tests.clear();
+        assert!(spec.teacher_graded(), "\"I'll grade it myself\"");
     }
 
     #[test]

@@ -7,6 +7,7 @@ use crate::net::{self, LiveServer, Phase, S2C};
 use crate::payload;
 use crate::runner;
 use crate::storage::{self, Project};
+use crate::ui::text_field::TextField;
 use crate::ui::{editor, rtl};
 use crate::ui::player::{run_output, test_report};
 use crate::ui::theme::{self, icon, pal};
@@ -641,16 +642,7 @@ impl Studio {
             });
             ui.add_space(4.0);
             theme::field_label(ui, "Prompt");
-            ui.add(egui::TextEdit::multiline(&mut q.prompt).hint_text("Write the question…").desired_rows(4).desired_width(theme::fill(&ui, 12)).margin(Margin::same(12)));
-            if rtl::has_rtl(&q.prompt) {
-                // The editor shows Arabic letters unjoined; this is exactly what students will see.
-                ui.label(theme::eyebrow("Students see"));
-                let p = pal();
-                egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::same(10)).show(ui, |ui| {
-                    ui.set_width(ui.available_width());
-                    rtl::label(ui, &q.prompt, egui::FontId::proportional(15.0), p.text);
-                });
-            }
+            ui.add(TextField::multiline(&mut q.prompt).hint_text("Write the question…").desired_rows(4).desired_width(theme::fill(&ui, 12)).margin(Margin::same(12)));
             ui.add_space(8.0);
             match &mut q.kind {
                 Kind::Choice { options, correct, multiple } => {
@@ -671,7 +663,7 @@ impl Studio {
                                     *correct = vec![oi];
                                 }
                             }
-                            ui.add(egui::TextEdit::singleline(opt).hint_text(format!("Option {letter}")).desired_width(field_w).margin(Margin::symmetric(10, 7)));
+                            ui.add(TextField::singleline(opt).hint_text(format!("Option {letter}")).desired_width(field_w).margin(Margin::symmetric(10, 7)));
                             if theme::icon_button(ui, icon::DELETE, "Remove option").clicked() {
                                 remove = Some(oi);
                             }
@@ -722,7 +714,7 @@ impl Studio {
                     let field_w = ui.available_width() - 48.0;
                     for (ai, a) in accepted.iter_mut().enumerate() {
                         ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(a).hint_text("Accepted answer").desired_width(field_w).margin(Margin::symmetric(10, 7)));
+                            ui.add(TextField::singleline(a).hint_text("Accepted answer").desired_width(field_w).margin(Margin::symmetric(10, 7)));
                             if theme::icon_button(ui, icon::DELETE, "Remove").clicked() {
                                 remove = Some(ai);
                             }
@@ -876,6 +868,10 @@ impl Studio {
                             }
                         }
 
+                        if new_mode != Mode::Manual && spec.tests.iter().all(|t| t.expected.trim().is_empty()) {
+                            ui.add(egui::Label::new(RichText::new(format!("{}  No expected output yet, so you'll grade this one yourself: students see \"waiting for your teacher\" until you send their score.", icon::WARNING)).color(p.warning).size(13.0)).wrap());
+                        }
+
                         // Optional: the teacher's own solution fills the expected outputs.
                         if new_mode != Mode::Manual {
                             ui.add_space(6.0);
@@ -962,7 +958,7 @@ impl Studio {
                     theme::field_label(ui, "Teacher / course");
                     theme::text_field(ui, &mut e.author, "e.g. Mr. Hussein — CS101", f32::INFINITY);
                     theme::field_label(ui, "Instructions shown before the exam");
-                    ui.add(egui::TextEdit::multiline(&mut e.instructions).desired_rows(3).desired_width(theme::fill(&ui, 10)).margin(Margin::same(10)));
+                    ui.add(TextField::multiline(&mut e.instructions).desired_rows(3).desired_width(theme::fill(&ui, 10)).margin(Margin::same(10)));
                     theme::field_label(ui, "Duration");
                     ui.add(egui::DragValue::new(&mut e.duration_min).range(1..=600).suffix(" minutes"));
                 });
@@ -1469,7 +1465,7 @@ impl Studio {
                     ui.label(if *b { "True" } else { "False" });
                 }
                 (_, Answer::Text(t)) => {
-                    ui.label(RichText::new(t).monospace());
+                    rtl::label(ui, t, theme::mono(13.5), p.text);
                 }
                 (_, Answer::File { name, size, data }) => {
                     ui.horizontal(|ui| {

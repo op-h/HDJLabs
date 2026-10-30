@@ -34,7 +34,7 @@ HDJLabs is one Windows program with two roles.
 
 | Teacher — **HDJLabs Studio** | Student — **the exported exam** |
 |---|---|
-| Write multiple-choice, multiple-answer, true/false, short-answer, **code** and **file upload** questions, in English or Arabic. | Runs from a single portable `.exe`. Nothing to install. |
+| Write multiple-choice, multiple-answer, true/false, short-answer, **code** and **file upload** questions, in English or Arabic (typed and shown right-to-left with joined letters). | Runs from a single portable `.exe`. Nothing to install. |
 | Export the exam as an encrypted `.exe` with an exam password and a proctor exit password. | Locks the PC until submission: other apps, the taskbar, shortcuts and touchpad gestures are blocked. |
 | Run a **Live classroom**: students download the exam from your PC; you see every download, every PC that has it open, and everyone who signed in. | A real code editor. **Python, JavaScript, SQL and HTML/CSS/JS are built in**; C, C++, Java, Go and Rust use compilers already on the PC. |
 | Watch progress and alerts, read each student's code as they write it, message them, add time, end the exam. | Answers autosave, encrypted, and survive crashes and power cuts. |
@@ -47,7 +47,7 @@ HDJLabs is one Windows program with two roles.
 | **[HDJLabs-Setup.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs-Setup.exe)** | For teachers. No admin rights needed: per-user by default, or for all users with an admin. Adds Start-menu and desktop shortcuts, opens `.hdjx` projects, installs the teacher guides, and includes an uninstaller. |
 | **[HDJLabs.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs.exe)** | The same Studio as one portable file. |
 
-Runs on **Windows 7 SP1, 8.1, 10 and 11 (64-bit)**. Nothing else is required: the C runtime is built in, and on PCs with no graphics driver (the "Microsoft Basic Display Adapter") HDJLabs switches to a CPU renderer by itself. If SmartScreen appears, choose **More info → Run anyway**; the files aren't code-signed yet. Before exam day, run one exported exam on a lab PC to check the lab's antivirus lets it start (see [preparing the lab](docs/classroom-network.md#prepare-the-lab-pcs)).
+Runs on **Windows 7 SP1, 8.1, 10 and 11 (64-bit)**. Nothing else is required: the C runtime is built in, and on PCs with no graphics driver (the "Microsoft Basic Display Adapter") HDJLabs switches to a CPU renderer by itself. If SmartScreen appears, choose **More info → Run anyway**. Exams exported from a signed Studio stay signed, releases are set up for free signing through SignPath Foundation, and one setting stops SmartScreen from checking exams downloaded from your PC in the lab: see **[code signing and SmartScreen](docs/code-signing.md)**. Before exam day, run one exported exam on a lab PC to check the lab's antivirus lets it start (see [preparing the lab](docs/classroom-network.md#prepare-the-lab-pcs)).
 
 Open the Studio, click **Load the sample exam** to see every question type, then **Preview** to try it as a student.
 

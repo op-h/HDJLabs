@@ -69,3 +69,48 @@ pub fn tick(ctx: &egui::Context) {
         }
     }
 }
+
+/// `HDJLABS_SHOT_INPUT="60:click:640,216;62:text:abc;64:key:ArrowLeft;66:key:shift+ArrowLeft"`:
+/// feeds clicks, typed text and key presses at the given frames, to test editing in captures.
+pub fn scripted_input(raw: &mut egui::RawInput) {
+    let Ok(script) = std::env::var("HDJLABS_SHOT_INPUT") else { return };
+    let n = frame();
+    for step in script.split(';') {
+        let mut it = step.splitn(3, ':');
+        let (Some(at), Some(kind), Some(arg)) = (it.next().and_then(|v| v.trim().parse::<u64>().ok()), it.next(), it.next()) else { continue };
+        let release = kind == "click" && n == at + 1;
+        if n != at && !release {
+            continue;
+        }
+        match kind {
+            "click" => {
+                if let Some((x, y)) = arg.split_once(',').and_then(|(x, y)| Some((x.parse::<f32>().ok()?, y.parse::<f32>().ok()?))) {
+                    let pos = egui::pos2(x, y);
+                    raw.events.push(egui::Event::PointerMoved(pos));
+                    raw.events.push(egui::Event::PointerButton { pos, button: egui::PointerButton::Primary, pressed: !release, modifiers: Default::default() });
+                }
+            }
+            "text" => raw.events.push(egui::Event::Text(arg.to_string())),
+            "key" => {
+                let mut modifiers = egui::Modifiers::default();
+                let mut name = arg;
+                while let Some((m, rest)) = name.split_once('+') {
+                    match m {
+                        "shift" => modifiers.shift = true,
+                        "ctrl" => {
+                            modifiers.ctrl = true;
+                            modifiers.command = true;
+                        }
+                        _ => {}
+                    }
+                    name = rest;
+                }
+                if let Some(key) = egui::Key::from_name(name) {
+                    raw.events.push(egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers });
+                    raw.events.push(egui::Event::Key { key, physical_key: None, pressed: false, repeat: false, modifiers });
+                }
+            }
+            _ => {}
+        }
+    }
+}

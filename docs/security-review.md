@@ -1,6 +1,6 @@
 # HDJLabs security review
 
-Scope: HDJLabs 1.2.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
+Scope: HDJLabs 1.3.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
 runner. Review date: 2026-10-30. Tested on Windows 11 (build 26300), and across a VMware LAN with student
 PCs on Windows 7 SP1 and Windows 8.1 (no GPU driver), using the debug and release builds.
 
@@ -90,6 +90,10 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | 36 | Antivirus | Microsoft Defender scan (signatures of 2026-10-30) of the release Studio and an exported exam | No threats found in either file. Other antivirus products can still differ; see *Prepare the lab PCs* in the classroom guide |
 | 37 | Keep-answers-off exam, live on Windows 7 SP1 and Windows 8.1 (no GPU driver) in lockdown | VMware LAN, release build | Each student PC scored itself 0 (it has no answer key); the teacher re-graded (Windows 7: 1/22 for the one right answer) and both screens showed "Graded by your teacher" with the teacher's score |
 | 38 | HTML preview on a PC without a graphics driver | Live test (Windows 8.1) | Found a bug (see below); after the fix the question shows a notice and every dialog is clickable |
+| 39 | Exam exported from a code-signed Studio | `signtool` + `Get-AuthenticodeSignature` with a test certificate | Exam carried in the signature's certificate bag: signature intact. Old appended format: `NotSigned`. One byte of code changed: `HashMismatch`. The signed exam opens and runs |
+| 40 | Code question with no expected output (left in "compare output" mode) | Unit test + capture | Treated as teacher-graded: the student waits for the teacher's score instead of seeing 0 for it |
+| 41 | SmartScreen and the intranet zone | Live test (Windows 8.1) | The same exam shows SmartScreen when marked as an Internet download and opens directly when marked Intranet; `lab-trust-teacher.ps1` moves the teacher's address to Intranet without admin rights |
+| 42 | Arabic and mixed text editing | Scripted keyboard input + captures | Joined letters, lam-alef ligature, right-aligned RTL lines, correct order for English inside Arabic, caret, arrows, selection, wrapping and Enter in multi-line fields |
 
 ## Findings fixed during the review
 
@@ -120,12 +124,14 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 * **Result files can be forged** by someone who extracts the teacher's public key and writes
   their own submission. The score inside is re-graded on the teacher's PC, so only the answers
   matter; the Live classroom also saw the answers as they were written. Prefer live collection.
-* **Typing Arabic** shows unjoined letters while typing (display text is shaped correctly).
 * **Student code has network access.** Firewalling it would need admin rights. Use a
   classroom network without internet, which is the intended setup anyway.
 * **Hardware, VMs and other devices** (phones, smart glasses, a second PC) are out of scope. VM
   detection is a best-effort BIOS-string check.
-* **Not code-signed yet**, so SmartScreen warns on first run.
+* **Code signing** is wired into the release workflow (SignPath Foundation, free for open
+  source) and switches on once the project is accepted; until then releases are unsigned. Even
+  signed, a new file can show SmartScreen until reputation builds up; in the lab the intranet
+  zone setting avoids it (see `docs/code-signing.md`).
 
 ## Reporting
 

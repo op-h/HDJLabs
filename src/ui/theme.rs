@@ -365,7 +365,7 @@ pub fn fill(ui: &egui::Ui, _margin_x: i8) -> f32 {
 
 pub fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str, width: f32) -> egui::Response {
     let width = if width.is_finite() { width.min(fill(ui, 10)) } else { fill(ui, 10) };
-    ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(width).margin(Margin::symmetric(10, 8)))
+    ui.add(crate::ui::text_field::TextField::singleline(value).hint_text(hint).desired_width(width).margin(Margin::symmetric(10, 8)))
 }
 
 pub fn progress_bar(ui: &mut egui::Ui, frac: f32, height: f32, color: Color32) {

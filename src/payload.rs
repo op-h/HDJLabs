@@ -1,6 +1,9 @@
-//! Exam packaging. An exported exam is the HDJLabs runtime with an encrypted exam appended:
+//! Exam packaging. An exported exam is the HDJLabs runtime plus the encrypted exam:
 //!
-//! `[runtime exe][header json][encrypted exam json][header_len u64][body_len u64]["HDJLAB01"]`
+//! `[header json][encrypted exam json][header_len u64][body_len u64]["HDJLAB01"]`
+//!
+//! Unsigned runtimes get that block appended. Code-signed runtimes carry it inside the
+//! signature's certificate bag instead (see `sigtag`), so the exam stays validly signed.
 //!
 //! The header is readable before the password is entered (title, duration, lockdown flags) and is
 //! bound to the ciphertext as AAD, so editing it — e.g. switching lockdown off — makes the exam
@@ -123,6 +126,17 @@ fn parse_trailer(data: &[u8]) -> Option<(u64, u64)> {
 }
 
 pub fn assemble(runtime: &[u8], header: &[u8], body: &[u8]) -> Vec<u8> {
+    if crate::sigtag::is_signed(runtime) {
+        let mut block = Vec::with_capacity(header.len() + body.len() + TRAILER);
+        block.extend_from_slice(header);
+        block.extend_from_slice(body);
+        block.extend_from_slice(&(header.len() as u64).to_le_bytes());
+        block.extend_from_slice(&(body.len() as u64).to_le_bytes());
+        block.extend_from_slice(MAGIC);
+        if let Some(out) = crate::sigtag::embed(runtime, &block) {
+            return out;
+        }
+    }
     let mut out = Vec::with_capacity(runtime.len() + header.len() + body.len() + TRAILER);
     out.extend_from_slice(strip(runtime));
     out.extend_from_slice(header);
@@ -142,10 +156,35 @@ pub fn export(exam: &Exam, teacher_pub: &str, preview: bool, hints: Vec<String>,
     std::fs::rename(&tmp, out)
 }
 
+/// Splits `[header][body][trailer]` into a package.
+fn parse_block(block: &[u8]) -> Option<Package> {
+    let (h, b) = parse_trailer(block)?;
+    if h + b + TRAILER as u64 != block.len() as u64 {
+        return None;
+    }
+    let header_bytes = block[..h as usize].to_vec();
+    let body = block[h as usize..(h + b) as usize].to_vec();
+    let header: Header = serde_json::from_slice(&header_bytes).ok()?;
+    Some(Package { header, header_bytes, body })
+}
+
 /// Reads the exam attached to a file without loading the whole executable into memory.
 pub fn read_file(path: &Path) -> std::io::Result<Option<Package>> {
     let mut f = std::fs::File::open(path)?;
     let len = f.metadata()?.len();
+    // Signed exam: the block rides in the signature's certificate table.
+    let mut head = vec![0u8; 4096.min(len as usize)];
+    f.read_exact(&mut head)?;
+    if let Some((off, size)) = crate::sigtag::table_location(&head) {
+        if (off + size) as u64 == len && (size as u64) <= MAX_SECTION {
+            let mut table = vec![0u8; size];
+            f.seek(SeekFrom::Start(off as u64))?;
+            f.read_exact(&mut table)?;
+            if let Some(pkg) = crate::sigtag::extract(&table).and_then(|b| parse_block(&b)) {
+                return Ok(Some(pkg));
+            }
+        }
+    }
     if len < TRAILER as u64 {
         return Ok(None);
     }

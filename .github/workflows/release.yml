@@ -39,6 +39,35 @@ jobs:
           CARGO_TARGET_DIR: target-win7
         run: cargo +${{ env.NIGHTLY }} build --release --locked "-Zbuild-std=std,panic_abort" --target x86_64-win7-windows-msvc
 
+      # ── Code signing (SignPath Foundation, free for open source) ─────────────────────────
+      # Runs only once the repository variable SIGNPATH_ORGANIZATION_ID is set; see
+      # docs/code-signing.md. Exams exported by a signed Studio stay signed (src/sigtag.rs).
+      - name: Upload unsigned HDJLabs.exe for signing
+        id: unsigned-exe
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-exe
+          path: target-win7/x86_64-win7-windows-msvc/release/HDJLabs.exe
+
+      - name: Sign HDJLabs.exe
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG }}'
+          signing-policy-slug: '${{ vars.SIGNPATH_POLICY_SLUG }}'
+          artifact-configuration-slug: 'hdjlabs-exe'
+          github-artifact-id: '${{ steps.unsigned-exe.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: signed-exe
+
+      - name: Use the signed HDJLabs.exe
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        shell: pwsh
+        run: Copy-Item signed-exe/HDJLabs.exe target-win7/x86_64-win7-windows-msvc/release/HDJLabs.exe -Force
+
       - name: Build installer
         shell: pwsh
         run: |
@@ -47,6 +76,38 @@ jobs:
           if ($version -notmatch '^\d') { $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
           & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" installer\HDJLabs.iss
           Copy-Item target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe dist\HDJLabs.exe
+
+      - name: Upload unsigned installer for signing
+        id: unsigned-setup
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: actions/upload-artifact@v4
+        with:
+          name: unsigned-setup
+          path: dist/HDJLabs-Setup.exe
+
+      - name: Sign installer
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        uses: signpath/github-action-submit-signing-request@v3
+        with:
+          api-token: '${{ secrets.SIGNPATH_API_TOKEN }}'
+          organization-id: '${{ vars.SIGNPATH_ORGANIZATION_ID }}'
+          project-slug: '${{ vars.SIGNPATH_PROJECT_SLUG }}'
+          signing-policy-slug: '${{ vars.SIGNPATH_POLICY_SLUG }}'
+          artifact-configuration-slug: 'hdjlabs-setup'
+          github-artifact-id: '${{ steps.unsigned-setup.outputs.artifact-id }}'
+          wait-for-completion: true
+          output-artifact-directory: signed-setup
+
+      - name: Use the signed installer and check both signatures
+        if: ${{ vars.SIGNPATH_ORGANIZATION_ID != '' }}
+        shell: pwsh
+        run: |
+          Copy-Item signed-setup/HDJLabs-Setup.exe dist/HDJLabs-Setup.exe -Force
+          foreach ($f in "dist/HDJLabs.exe", "dist/HDJLabs-Setup.exe") {
+            $s = Get-AuthenticodeSignature $f
+            "$f : $($s.Status) — $($s.SignerCertificate.Subject)"
+            if ($s.Status -ne "Valid") { throw "$f is not validly signed" }
+          }
 
       - name: Checksums
         shell: pwsh

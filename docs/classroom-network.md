@@ -18,9 +18,15 @@ devices from seeing each other.
 
 Do this once, a day before the exam, on one lab PC:
 
-1. **Run a practice exam** (*Preview* or any exported exam with lockdown) and submit it. If
-   Windows shows **SmartScreen**, choose *More info → Run anyway*. The files aren't code-signed
-   yet, so SmartScreen warns the first time a new file is seen.
+1. **Run a practice exam** (*Preview* or any exported exam with lockdown) and submit it.
+   **SmartScreen:** if Windows says *"Windows protected your PC"*, either choose *More info → Run
+   anyway*, or stop it for good by putting your PC in the intranet zone on each student PC (no
+   admin needed; press Win+R and paste):
+   ```
+   powershell -ExecutionPolicy Bypass -File "%LOCALAPPDATA%\Programs\HDJLabs\tools\lab-trust-teacher.ps1" -Teacher 192.168.1.20
+   ```
+   (use the address on your Live classroom page; details and the Group Policy for a whole lab
+   in [code signing and SmartScreen](code-signing.md)).
 2. **Antivirus.** An exam blocks shortcuts with a keyboard hook, deletes itself when asked and
    carries an encrypted payload, which some antivirus products flag. HDJLabs 1.2.0 passes a
    Microsoft Defender scan; if the lab uses another product and it blocks or quarantines the
@@ -31,9 +37,9 @@ Do this once, a day before the exam, on one lab PC:
    Add-MpPreference -ExclusionPath "C:\Exams"
    ```
 3. **Network.** Start a session on your PC and check the practice exam shows *Connected*.
-4. **Arabic.** Arabic text in questions and options is shown joined and right-to-left. Students
-   typing Arabic into a short answer see the letters unjoined while typing; the answer is still
-   stored and graded correctly.
+4. **Arabic.** Questions, options, names and answers can be in Arabic: letters join, lines read
+   right-to-left, and mixed Arabic and English keeps the right order, both while typing and in
+   the exam.
 
 ## Ports
 

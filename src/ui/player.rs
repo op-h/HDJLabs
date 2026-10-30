@@ -7,6 +7,7 @@ use crate::net::{Conn, LanClient, LiveStatus, Phase, S2C};
 use crate::payload::Package;
 use crate::runner::{self, RunOutput};
 use crate::storage;
+use crate::ui::text_field::TextField;
 use crate::ui::{editor, rtl};
 use crate::ui::theme::{self, icon, pal};
 use egui::{Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Stroke};
@@ -359,12 +360,15 @@ impl Player {
                 }
                 let ids: Vec<u32> = at.order.clone();
                 let exam = self.exam.as_ref().unwrap();
-                for id in ids.iter().take(2) {
+                for id in ids.iter().take(if script == "finished-code" { usize::MAX } else { 2 }) {
                     let q = exam.questions.iter().find(|q| q.id == *id).unwrap();
                     let a = match &q.kind {
                         Kind::Choice { correct, .. } => Answer::Choice(correct.clone()),
                         Kind::TrueFalse { .. } => Answer::Bool(true),
                         Kind::Short { .. } => Answer::Text("def".into()),
+                        Kind::Code(c) if script == "finished-code" => Answer::Code { lang: c.lang, source: format!("{}
+print(42)
+", c.starter) },
                         Kind::Code(c) => Answer::Code { lang: c.lang, source: c.starter.clone() },
                         Kind::Upload { .. } => Answer::Empty,
                     };
@@ -1120,8 +1124,8 @@ impl Player {
                 let format = show_format.then(|| accepted.iter().find(|a| !a.trim().is_empty()).map(|a| answer_format(a))).flatten();
                 let font = theme::mono(16.0);
                 let hint = if format.is_some() { String::new() } else { "Type your answer".into() };
-                let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text(RichText::new(hint).font(font.clone()).color(p.faint)).font(font.clone()).desired_width(theme::fill(&ui, 14)).margin(Margin::symmetric(14, 12)));
-                if let Some(f) = &format {
+                let r = ui.add(TextField::singleline(&mut text).hint_text(hint).hint_style(font.clone(), p.faint).font(font.clone()).char_limit(2000).desired_width(theme::fill(&ui, 14)).margin(Margin::symmetric(14, 12)));
+                if let Some(f) = format.as_ref().filter(|_| !rtl::has_rtl(&text)) {
                     // TryHackMe style: every typed character uses up one slot of the pattern and the
                     // rest stays visible right after the cursor — "TH" over "***{****}" shows "TH*{****}".
                     let typed = text.chars().count();
@@ -1248,6 +1252,10 @@ impl Player {
                             ui.add_space(12.0);
                             ui.add(egui::Label::new(theme::muted("Your page appears live under the editor as you type. Your teacher grades the finished page.").size(13.0)).wrap());
                         }
+                        if spec.lang != Lang::Web && spec.teacher_graded() {
+                            ui.add_space(12.0);
+                            ui.add(egui::Label::new(theme::muted("Your teacher reads and grades this answer. Use Run to try your program.").size(13.0)).wrap());
+                        }
                         let visible: Vec<&TestCase> = spec.tests.iter().filter(|t| !t.hidden && !t.expected.trim().is_empty()).collect();
                         if !visible.is_empty() {
                             ui.add_space(12.0);
@@ -1267,7 +1275,7 @@ impl Player {
                             }
                         }
                         let hidden = spec.tests.iter().filter(|t| t.hidden).count();
-                        if hidden > 0 {
+                        if hidden > 0 && !spec.teacher_graded() {
                             ui.add_space(6.0);
                             ui.label(theme::muted(format!("{}  {hidden} hidden test(s) also run when you submit.", icon::INFO)).size(12.5));
                         }
@@ -1295,7 +1303,7 @@ impl Player {
                                 let run = ui.add_enabled(!running && tool.is_some(), egui::Button::new(RichText::new(format!("{}  Run", icon::PLAY)).font(theme::semibold(14.0)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(80.0, 30.0))).on_hover_text("Run your code  (F5)");
                                 run_req |= run.clicked();
                             }
-                            let has_tests = spec.tests.iter().any(|t| !t.hidden) && !spec.lang.is_preview_only();
+                            let has_tests = !spec.teacher_graded() && spec.tests.iter().any(|t| !t.hidden && !t.expected.trim().is_empty());
                             if has_tests && ui.add_enabled(!running && tool.is_some(), egui::Button::new(format!("{}  Run tests", icon::TESTS)).fill(theme::clear_fill(ui)).min_size(egui::vec2(0.0, 30.0))).on_hover_text("Check against the examples  (Ctrl+Enter)").clicked() {
                                 tests_req = true;
                             }
@@ -1347,7 +1355,12 @@ impl Player {
                             ui.put(egui::Rect::from_min_size(rect.min + egui::vec2(16.0, rect.height() / 2.0 + 16.0), egui::vec2(rect.width() - 32.0, 60.0)), egui::Label::new(RichText::new(err).size(12.0).color(egui::Color32::from_rgb(90, 90, 90))).wrap());
                         }
                     } else {
-                    let tabs: &[(BottomTab, &str)] = if spec.lang == Lang::Sql { &[(BottomTab::Output, "Result"), (BottomTab::Tests, "Tests")] } else { &[(BottomTab::Output, "Output"), (BottomTab::Input, "Input (stdin)"), (BottomTab::Tests, "Tests")] };
+                    let all: &[(BottomTab, &str)] = if spec.lang == Lang::Sql { &[(BottomTab::Output, "Result"), (BottomTab::Tests, "Tests")] } else { &[(BottomTab::Output, "Output"), (BottomTab::Input, "Input (stdin)"), (BottomTab::Tests, "Tests")] };
+                    // Nothing to test against when the teacher grades it.
+                    let tabs = if spec.teacher_graded() { &all[..all.len() - 1] } else { all };
+                    if spec.teacher_graded() && cu.tab == BottomTab::Tests {
+                        cu.tab = BottomTab::Output;
+                    }
                     ui.horizontal(|ui| {
                         ui.spacing_mut().item_spacing.x = 18.0;
                         for &(tab, label) in tabs {
@@ -1589,7 +1602,7 @@ impl Player {
                 ui.set_width(440.0);
                 ui.label(theme::heading(format!("{}  Message from your teacher", icon::MESSAGE), 20.0));
                 ui.add_space(6.0);
-                ui.label(RichText::new(text).size(16.0));
+                rtl::label(ui, &text, egui::FontId::proportional(16.0), pal().text);
                 ui.add_space(10.0);
                 if theme::primary(ui, "OK").clicked() {
                     self.teacher_msg = None;

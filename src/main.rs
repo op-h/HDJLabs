@@ -15,6 +15,7 @@ mod model;
 mod net;
 mod payload;
 mod runner;
+mod sigtag;
 mod storage;
 mod ui;
 
@@ -40,6 +41,24 @@ fn main() {
         exam.settings.lockdown = mode != "0";
         exam.settings.block_remote_tools = mode == "1";
         exam.settings.keep_answers_off_pcs = std::env::var_os("HDJLABS_DEV_HIDE_ANSWERS").is_some();
+        if std::env::var_os("HDJLABS_DEV_NO_EXPECTED").is_some() {
+            // A teacher who left "Compare the printed output" without saying what to expect.
+            for q in &mut exam.questions {
+                if let model::Kind::Code(c) = &mut q.kind {
+                    for t in &mut c.tests {
+                        t.expected.clear();
+                    }
+                }
+            }
+        }
+        if std::env::var_os("HDJLABS_DEV_MANUAL").is_some() {
+            // Every code question graded by the teacher ("I'll grade it myself").
+            for q in &mut exam.questions {
+                if let model::Kind::Code(c) = &mut q.kind {
+                    c.tests.clear();
+                }
+            }
+        }
         if mode == "0" && std::env::var_os("HDJLABS_DEV_UPLOAD").is_some() {
             let id = exam.questions.iter().map(|q| q.id).max().unwrap_or(0) + 1;
             let mut q = model::Question::new(id, model::Kind::Upload { extensions: vec!["pdf".into(), "docx".into(), "zip".into()], max_mb: 2.0 });

@@ -1,9 +1,9 @@
 ; HDJLabs Studio installer (Inno Setup 6).
-; Build:  ISCC.exe /DAppVersion=1.2.0 /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
+; Build:  ISCC.exe /DAppVersion=1.3.0 /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
 ; Exported exams never need this — they are single portable .exe files.
 
 #ifndef AppVersion
-  #define AppVersion "1.2.0"
+  #define AppVersion "1.3.0"
 #endif
 #ifndef SourceExe
   #define SourceExe "..\target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe"
@@ -50,6 +50,7 @@ Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "HDJLabs.exe"; Flags: ignore
 Source: "..\docs\guides\*.gif"; DestDir: "{app}\guides"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\assets\Phosphor-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\tools\lab-trust-teacher.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion
 
 [Icons]
 Name: "{autoprograms}\HDJLabs Studio"; Filename: "{app}\HDJLabs.exe"; Comment: "Build and run secure exams"

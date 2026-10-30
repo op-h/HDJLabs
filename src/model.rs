@@ -124,6 +124,12 @@ pub struct CodeSpec {
 }
 
 impl CodeSpec {
+    /// Graded by the teacher: no tests, a page preview, or tests that don't say what to expect
+    /// (scoring those automatically would give everyone zero).
+    pub fn teacher_graded(&self) -> bool {
+        self.lang.is_preview_only() || self.tests.iter().all(|t| t.expected.trim().is_empty())
+    }
+
     pub fn new(lang: Lang) -> Self {
         CodeSpec {
             lang,
