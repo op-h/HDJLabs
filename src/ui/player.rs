@@ -7,7 +7,7 @@ use crate::net::{Conn, LanClient, LiveStatus, Phase, S2C};
 use crate::payload::Package;
 use crate::runner::{self, RunOutput};
 use crate::storage;
-use crate::ui::editor;
+use crate::ui::{editor, rtl};
 use crate::ui::theme::{self, icon, pal};
 use egui::{Align, Color32, CornerRadius, Key, Layout, Margin, RichText, Stroke};
 use rand::seq::SliceRandom;
@@ -41,6 +41,9 @@ struct Attempt {
     deadline: u64,
     violations: Vec<Violation>,
     submitted: Option<Submission>,
+    /// The teacher finished grading and sent the final score.
+    #[serde(default)]
+    graded: bool,
 }
 
 #[derive(PartialEq, Clone, Copy)]
@@ -101,6 +104,7 @@ pub struct Player {
     confirm_submit: bool,
     proctor: Option<(String, Option<String>)>,
     teacher_msg: Option<String>,
+    upload_error: Option<String>,
     grading: Option<Receiver<Submission>>,
     saved_paths: Vec<std::path::PathBuf>,
     window: Option<lockdown::Window>,
@@ -151,6 +155,7 @@ impl Player {
             confirm_submit: false,
             proctor: None,
             teacher_msg: None,
+            upload_error: None,
             grading: None,
             saved_paths: vec![],
             window: None,
@@ -161,7 +166,13 @@ impl Player {
             focus_lost: false,
             font: 15.0,
             allow_close: mode == Mode::Windowed,
-            web: Default::default(),
+            // The CPU renderer runs on PCs without a graphics driver, where WebView2 doesn't draw
+            // and its window can't be layered under egui's dialogs.
+            web: if crate::ui::software_requested() {
+                crate::ui::web::WebPreview::disabled("Live preview isn't available on this PC (no graphics driver). Your page is still saved and submitted, and your teacher sees it.")
+            } else {
+                Default::default()
+            },
             remove_requested: false,
             close_countdown: None,
             finalized: false,
@@ -355,6 +366,7 @@ impl Player {
                         Kind::TrueFalse { .. } => Answer::Bool(true),
                         Kind::Short { .. } => Answer::Text("def".into()),
                         Kind::Code(c) => Answer::Code { lang: c.lang, source: c.starter.clone() },
+                        Kind::Upload { .. } => Answer::Empty,
                     };
                     at.answers.insert(*id, a);
                 }
@@ -364,10 +376,22 @@ impl Player {
                 let want = script.split(':').nth(1).unwrap_or("choice").to_string();
                 let pos = ids.iter().position(|id| {
                     let q = exam.questions.iter().find(|q| q.id == *id).unwrap();
-                    matches!((&q.kind, want.as_str()), (Kind::Short { accepted, .. }, "flag") if accepted.iter().any(|a| a.contains('{'))) || matches!((&q.kind, want.as_str()), (Kind::Choice { multiple: false, .. }, "choice") | (Kind::Code(CodeSpec { lang: Lang::Python, .. }), "code") | (Kind::Code(CodeSpec { lang: Lang::Sql, .. }), "sql") | (Kind::Code(CodeSpec { lang: Lang::Web, .. }), "web") | (Kind::Short { .. }, "short"))
+                    matches!((&q.kind, want.as_str()), (Kind::Short { accepted, .. }, "flag") if accepted.iter().any(|a| a.contains('{'))) || matches!((&q.kind, want.as_str()), (Kind::Choice { multiple: false, .. }, "choice") | (Kind::Code(CodeSpec { lang: Lang::Python, .. }), "code") | (Kind::Code(CodeSpec { lang: Lang::Sql, .. }), "sql") | (Kind::Code(CodeSpec { lang: Lang::Web, .. }), "web") | (Kind::Short { .. }, "short") | (Kind::Upload { .. }, "upload"))
                 });
                 at.current = pos.unwrap_or(0);
                 let qid = ids[at.current];
+                if let Ok(prompt) = std::env::var("HDJLABS_SHOT_PROMPT") {
+                    let e = self.exam.as_mut().unwrap();
+                    if let Some(q) = e.questions.iter_mut().find(|q| q.id == qid) {
+                        q.prompt = prompt;
+                        if let Kind::Choice { options, .. } = &mut q.kind {
+                            for (o, t) in options.iter_mut().zip(["مكدس (Stack)", "طابور (Queue)", "جدول تجزئة", "شجرة ثنائية"]) {
+                                *o = t.into();
+                            }
+                        }
+                    }
+                }
+                let exam = self.exam.as_ref().unwrap();
                 let q = exam.questions.iter().find(|q| q.id == qid).unwrap().clone();
                 if let Kind::Code(c) = &q.kind {
                     let src = if c.lang == Lang::Sql { "SELECT name
@@ -401,9 +425,15 @@ ORDER BY grade DESC;
                 if script == "grading" {
                     self.screen = Screen::Grading;
                 }
-                if script == "finished" || script == "finished-remove" {
+                if script.starts_with("finished") {
+                    if let Some(e) = self.exam.as_mut() {
+                        e.settings.hold_scores = script == "finished-wait";
+                    }
                     self.submit(false);
                     self.remove_requested = script == "finished-remove";
+                    if script == "finished-graded" {
+                        self.at.as_mut().unwrap().graded = true;
+                    }
                 }
             }
             _ => {}
@@ -453,6 +483,17 @@ ORDER BY grade DESC;
                 S2C::ForceSubmit => {
                     if matches!(self.screen, Screen::Exam) {
                         self.submit(true);
+                    }
+                }
+                S2C::Graded { results, score } => {
+                    if let Some(sub) = self.at.as_mut().and_then(|a| a.submitted.as_mut()) {
+                        sub.results = results.into_iter().filter(|r| sub.question_order.contains(&r.qid)).collect();
+                        sub.score = score.clamp(0.0, sub.max_score);
+                        self.at.as_mut().unwrap().graded = true;
+                        if let (Some(at), Some(exam)) = (&self.at, &self.exam) {
+                            storage::attempt_save(&exam.id, &self.key, at);
+                        }
+                        self.dirty = true;
                     }
                 }
                 S2C::RemoveExam => {
@@ -586,6 +627,7 @@ fn new_attempt(exam: &Exam, name: String, sid: String) -> Attempt {
         deadline: now + exam.duration_min as u64 * 60,
         violations: vec![],
         submitted: None,
+        graded: false,
     }
 }
 
@@ -742,7 +784,7 @@ impl Player {
                     ui.add_space(40.0);
                     ui.label(theme::eyebrow(if self.locked() { "Locked exam session" } else { "Practice session" }));
                     ui.add_space(4.0);
-                    ui.add(egui::Label::new(theme::heading(&h.title, 34.0)).wrap());
+                    ui.add(egui::Label::new(theme::heading(&rtl::line(&h.title), 34.0)).wrap());
                     if !h.author.is_empty() {
                         ui.label(RichText::new(&h.author).size(15.0).color(p.muted));
                     }
@@ -824,19 +866,19 @@ impl Player {
                         let label = if busy { "Checking password…".to_string() } else { format!("Start exam   {}", icon::FORWARD) };
                         let start = ui.add_enabled(
                             !busy && cooldown.is_none(),
-                            egui::Button::new(RichText::new(label).font(theme::semibold(15.0)).color(p.on_accent)).fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(ui.available_width(), 40.0)),
+                            egui::Button::new(RichText::new(label).font(theme::semibold(15.0)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(ui.available_width(), 40.0)),
                         );
                         if (start.clicked() || enter) && !busy {
                             self.begin_unlock();
                         }
                         ui.add_space(6.0);
                         ui.horizontal(|ui| {
-                            if ui.add(egui::Button::new(theme::muted(format!("{}  Teacher address", icon::NETWORK)).size(13.0)).frame(false)).clicked() {
+                            if ui.add(egui::Button::new(theme::muted(format!("{}  Teacher address", icon::NETWORK)).size(13.0)).frame_when_inactive(false)).clicked() {
                                 self.show_net = !self.show_net;
                                 self.manual_edit = self.manual_addr.lock().unwrap().clone();
                             }
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                if ui.add(egui::Button::new(theme::muted("Leave").size(13.0)).frame(false)).on_hover_text("Close without starting the exam").clicked() {
+                                if ui.add(egui::Button::new(theme::muted("Leave").size(13.0)).frame_when_inactive(false)).on_hover_text("Close without starting the exam").clicked() {
                                     self.allow_close = true;
                                     ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
                                 }
@@ -920,12 +962,13 @@ impl Player {
                         let flagged = at.flags.contains(qid);
                         let current = idx == at.current;
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(36.0, 36.0), egui::Sense::click());
+                        let hov = resp.hovered();
                         let (fill, stroke, text) = if current {
-                            (p.accent, p.accent, p.on_accent)
+                            (if hov { p.accent_hover } else { p.accent }, p.accent, p.on_accent)
                         } else if done {
-                            (p.accent_soft, p.accent.gamma_multiply(0.45), p.accent)
-                        } else if resp.hovered() {
-                            (p.surface2, p.border_strong, p.text)
+                            (if hov { p.hover } else { p.accent_soft }, if hov { p.accent } else { p.accent.gamma_multiply(0.45) }, p.accent)
+                        } else if hov {
+                            (p.hover, p.accent.gamma_multiply(0.7), p.text)
                         } else {
                             (Color32::TRANSPARENT, p.border, p.muted)
                         };
@@ -969,11 +1012,11 @@ impl Player {
 
         egui::Panel::bottom("exam-nav").frame(egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(Margin::symmetric(24, 10))).show_inside(ui, |ui| {
             ui.horizontal(|ui| {
-                if ui.add_enabled(idx > 0, egui::Button::new(format!("{}  Previous", icon::BACK)).fill(Color32::TRANSPARENT).min_size(egui::vec2(0.0, 34.0))).clicked() {
+                if ui.add_enabled(idx > 0, egui::Button::new(format!("{}  Previous", icon::BACK)).fill(theme::clear_fill(ui)).min_size(egui::vec2(0.0, 34.0))).clicked() {
                     self.at.as_mut().unwrap().current = idx - 1;
                 }
                 let flag_txt = if flagged { format!("{}  Flagged", icon::FLAG) } else { format!("{}  Flag for review", icon::FLAG) };
-                let b = egui::Button::new(RichText::new(flag_txt).color(if flagged { p.warning } else { p.text })).fill(if flagged { p.warning.gamma_multiply(0.10) } else { Color32::TRANSPARENT }).stroke(Stroke::new(1.0_f32, if flagged { p.warning.gamma_multiply(0.6) } else { p.border })).min_size(egui::vec2(0.0, 34.0));
+                let b = egui::Button::new(RichText::new(flag_txt).color(if flagged { p.warning } else { p.text })).fill(if flagged { p.warning.gamma_multiply(0.10) } else { theme::clear_fill(ui) }).stroke(theme::outline(ui, if flagged { p.warning.gamma_multiply(0.6) } else { p.border })).min_size(egui::vec2(0.0, 34.0));
                 if ui.add(b).clicked() {
                     let f = &mut self.at.as_mut().unwrap().flags;
                     if !f.remove(&q.id) {
@@ -1004,7 +1047,7 @@ impl Player {
                         ui.add_space(8.0);
                         question_header(ui, &q, idx);
                         ui.add_space(8.0);
-                        ui.add(egui::Label::new(RichText::new(&q.prompt).size(19.0).color(p.text)).wrap());
+                        rtl::label(ui, &q.prompt, egui::FontId::proportional(19.0), p.text);
                         ui.add_space(20.0);
                         self.answer_widget(ui, &q);
                     });
@@ -1015,6 +1058,7 @@ impl Player {
 
     fn answer_widget(&mut self, ui: &mut egui::Ui, q: &Question) {
         let p = pal();
+        let locked = self.pkg.header.lockdown;
         let at = self.at.as_mut().unwrap();
         let mut changed = false;
         match &q.kind {
@@ -1059,8 +1103,8 @@ impl Player {
                 ui.horizontal(|ui| {
                     for (val, label) in [(true, "True"), (false, "False")] {
                         let on = cur == Some(val);
-                        let (fill, stroke, col) = if on { (p.accent, p.accent, p.on_accent) } else { (p.surface, p.border_strong, p.text) };
-                        let b = egui::Button::new(RichText::new(label).font(theme::semibold(16.0)).color(col)).fill(fill).stroke(Stroke::new(1.0_f32, stroke)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(160.0, 52.0));
+                        let (fill, stroke, col) = if on { (p.accent, p.accent, p.on_accent) } else if theme::will_hover(ui) { (p.hover, p.border_strong, p.text) } else { (p.surface, p.border_strong, p.text) };
+                        let b = egui::Button::new(RichText::new(label).font(theme::semibold(16.0)).color(col)).fill(fill).stroke(theme::outline(ui, stroke)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(160.0, 52.0));
                         if ui.add(b).clicked() {
                             at.answers.insert(q.id, Answer::Bool(val));
                             changed = true;
@@ -1088,17 +1132,76 @@ impl Player {
                         ui.painter().with_clip_rect(r.rect.shrink(2.0)).text(pos, egui::Align2::LEFT_CENTER, rest, font.clone(), p.faint);
                     }
                 }
-                if let Some(f) = &format {
-                    ui.horizontal(|ui| {
-                        ui.label(theme::eyebrow("Answer format"));
-                        ui.label(theme::figure(f, 14.0, p.text));
-                        ui.label(theme::muted(format!("· {} characters", f.chars().count())).size(12.5));
-                    });
-                }
                 if r.changed() {
                     at.answers.insert(q.id, Answer::Text(text.chars().take(2000).collect()));
                     changed = true;
                 }
+            }
+            Kind::Upload { extensions, max_mb } => {
+                let cur = match at.answers.get(&q.id) {
+                    Some(Answer::File { name, size, .. }) => Some((name.clone(), *size)),
+                    _ => None,
+                };
+                let types = if extensions.is_empty() { "Any file".to_string() } else { extensions.iter().map(|e| format!(".{e}")).collect::<Vec<_>>().join("  ") };
+                let limit = max_mb.min(MAX_UPLOAD_MB);
+                egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::same(16)).show(ui, |ui| {
+                    ui.set_width(theme::fill(ui, 0));
+                    if locked {
+                        ui.label(RichText::new("File uploads are turned off while the exam is locked. Ask your teacher.").color(p.warning));
+                        return;
+                    }
+                    match &cur {
+                        Some((name, size)) => {
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::DOC).size(20.0).color(p.accent));
+                                ui.vertical(|ui| {
+                                    ui.label(RichText::new(name).font(theme::semibold(15.0)));
+                                    ui.label(theme::muted(fmt_size(*size)).size(12.5));
+                                });
+                            });
+                        }
+                        None => {
+                            ui.label(theme::muted("No file attached yet."));
+                        }
+                    }
+                    ui.label(theme::muted(format!("{types} · up to {} MB", theme::fmt_points(limit))).size(12.5));
+                    ui.add_space(4.0);
+                    ui.horizontal(|ui| {
+                        if theme::primary(ui, &format!("{}  {}", icon::OPEN, if cur.is_some() { "Replace file" } else { "Choose file" })).clicked() {
+                            let mut dlg = rfd::FileDialog::new().set_title("Attach a file");
+                            if !extensions.is_empty() {
+                                dlg = dlg.add_filter("Allowed files", &extensions.iter().map(String::as_str).collect::<Vec<_>>());
+                            }
+                            if let Some(path) = dlg.pick_file() {
+                                let others: u64 = at.answers.iter().filter(|(k, _)| **k != q.id).map(|(_, a)| if let Answer::File { size, .. } = a { *size } else { 0 }).sum();
+                                let ext = path.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+                                let name = path.file_name().map(|n| n.to_string_lossy().into_owned()).unwrap_or_default();
+                                let mb = |b: u64| b as f32 / (1024.0 * 1024.0);
+                                self.upload_error = match std::fs::metadata(&path) {
+                                    Err(e) => Some(e.to_string()),
+                                    Ok(_) if !extensions.is_empty() && !extensions.iter().any(|e| e.eq_ignore_ascii_case(&ext)) => Some(format!("That file type isn't allowed here ({types}).")),
+                                    Ok(m) if mb(m.len()) > limit => Some(format!("{name} is {} — the limit is {} MB.", fmt_size(m.len()), theme::fmt_points(limit))),
+                                    Ok(m) if mb(m.len() + others) > MAX_UPLOAD_MB => Some(format!("All your files together must stay under {} MB.", theme::fmt_points(MAX_UPLOAD_MB))),
+                                    Ok(_) => match std::fs::read(&path) {
+                                        Ok(bytes) => {
+                                            at.answers.insert(q.id, Answer::File { name, size: bytes.len() as u64, data: crate::crypto::b64(&bytes) });
+                                            changed = true;
+                                            None
+                                        }
+                                        Err(e) => Some(e.to_string()),
+                                    },
+                                };
+                            }
+                        }
+                        if cur.is_some() && theme::ghost(ui, &format!("{}  Remove", icon::DELETE)).clicked() {
+                            at.answers.remove(&q.id);
+                            changed = true;
+                        }
+                    });
+                    if let Some(e) = &self.upload_error {
+                        ui.label(RichText::new(e).color(p.danger));
+                    }
+                });
             }
             Kind::Code(_) => {}
         }
@@ -1131,7 +1234,7 @@ impl Player {
                     egui::ScrollArea::vertical().id_salt("prompt").auto_shrink([false, false]).show(ui, |ui| {
                         question_header(ui, q, idx);
                         ui.add_space(4.0);
-                        ui.add(egui::Label::new(RichText::new(&q.prompt).size(16.0)).wrap());
+                        rtl::label(ui, &q.prompt, egui::FontId::proportional(16.0), p.text);
                         if spec.lang == Lang::Sql && !spec.setup.trim().is_empty() {
                             ui.add_space(12.0);
                             ui.label(theme::eyebrow("Database"));
@@ -1189,11 +1292,11 @@ impl Player {
                                     self.web.reload();
                                 }
                             } else {
-                                let run = ui.add_enabled(!running && tool.is_some(), egui::Button::new(RichText::new(format!("{}  Run", icon::PLAY)).font(theme::semibold(14.0)).color(p.on_accent)).fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(80.0, 30.0))).on_hover_text("Run your code  (F5)");
+                                let run = ui.add_enabled(!running && tool.is_some(), egui::Button::new(RichText::new(format!("{}  Run", icon::PLAY)).font(theme::semibold(14.0)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(80.0, 30.0))).on_hover_text("Run your code  (F5)");
                                 run_req |= run.clicked();
                             }
                             let has_tests = spec.tests.iter().any(|t| !t.hidden) && !spec.lang.is_preview_only();
-                            if has_tests && ui.add_enabled(!running && tool.is_some(), egui::Button::new(format!("{}  Run tests", icon::TESTS)).fill(Color32::TRANSPARENT).min_size(egui::vec2(0.0, 30.0))).on_hover_text("Check against the examples  (Ctrl+Enter)").clicked() {
+                            if has_tests && ui.add_enabled(!running && tool.is_some(), egui::Button::new(format!("{}  Run tests", icon::TESTS)).fill(theme::clear_fill(ui)).min_size(egui::vec2(0.0, 30.0))).on_hover_text("Check against the examples  (Ctrl+Enter)").clicked() {
                                 tests_req = true;
                             }
                             if running {
@@ -1250,7 +1353,7 @@ impl Player {
                         for &(tab, label) in tabs {
                             let on = cu.tab == tab;
                             let txt = RichText::new(label.to_uppercase()).font(theme::mono(11.5)).extra_letter_spacing(0.8).color(if on { p.text } else { p.muted });
-                            let r = ui.add(egui::Button::new(txt).frame(false));
+                            let r = ui.add(egui::Button::new(txt).frame_when_inactive(false));
                             if on {
                                 let rr = r.rect;
                                 ui.painter().line_segment([rr.left_bottom() + egui::vec2(4.0, 2.0), rr.right_bottom() + egui::vec2(-4.0, 2.0)], Stroke::new(2.0_f32, p.accent));
@@ -1318,6 +1421,13 @@ impl Player {
         let show_score = exam.as_ref().is_some_and(|e| e.settings.show_score);
         let show_review = exam.as_ref().is_some_and(|e| e.settings.show_review);
         let acked = self.lan.submit_acked();
+        let graded = self.at.as_ref().is_some_and(|a| a.graded);
+        // Hold the marks back while the teacher still has answers to grade (or asked to release them).
+        let hold = (show_score || show_review) && !graded && (exam.as_ref().is_some_and(|e| e.settings.hold_scores || e.settings.keep_answers_off_pcs) || sub.results.iter().any(|r| r.status == Status::Review));
+        let (show_score, show_review) = (show_score && !hold, show_review && !hold);
+        if hold {
+            ui.ctx().request_repaint_after(Duration::from_millis(500));
+        }
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             ui.vertical_centered(|ui| {
                 ui.add_space(48.0);
@@ -1330,7 +1440,7 @@ impl Player {
                         ui.painter().text(rect.center(), egui::Align2::CENTER_CENTER, icon::CHECK, egui::FontId::proportional(22.0), p.accent);
                         ui.add_space(8.0);
                         ui.label(theme::heading("Exam submitted", 26.0));
-                        ui.label(theme::muted(format!("{} · {}", sub.student_name, sub.exam_title)));
+                        ui.label(theme::muted(format!("{} · {}", rtl::line(&sub.student_name), rtl::line(&sub.exam_title))));
                         if sub.forced {
                             ui.label(RichText::new("Submitted automatically (time is up or the teacher ended the exam).").color(p.warning));
                         }
@@ -1356,12 +1466,27 @@ impl Player {
                             ui.ctx().request_repaint_after(Duration::from_millis(500));
                         }
 
+                        if hold {
+                            ui.add_space(18.0);
+                            let online = matches!(self.lan.conn(), Conn::Connected(_));
+                            ui.add(egui::Spinner::new().size(30.0).color(p.accent));
+                            ui.add_space(6.0);
+                            ui.label(RichText::new("Waiting for your teacher to finish grading").font(theme::semibold(16.0)).color(p.text));
+                            ui.label(theme::muted(if online {
+                                "Your score appears here as soon as it's ready. Keep this window open."
+                            } else {
+                                "Your teacher will share your score. You can close the exam now."
+                            }));
+                        }
                         if show_score {
                             ui.add_space(14.0);
+                            if graded {
+                                ui.label(RichText::new(format!("{}  Graded by your teacher", icon::CHECK)).font(theme::semibold(13.5)).color(p.success));
+                            }
                             let pct = if sub.max_score > 0.0 { sub.score / sub.max_score * 100.0 } else { 0.0 };
                             ui.label(theme::figure(format!("{} / {}", theme::fmt_points(sub.score), theme::fmt_points(sub.max_score)), 40.0, p.text));
                             ui.label(theme::figure(format!("{pct:.0}%"), 14.0, p.muted));
-                            if sub.results.iter().any(|r| r.status == Status::Review) {
+                            if !graded && sub.results.iter().any(|r| r.status == Status::Review) {
                                 ui.label(theme::muted("Some answers will be reviewed by your teacher — your final score may change."));
                             }
                         }
@@ -1379,7 +1504,7 @@ impl Player {
                                 };
                                 ui.horizontal(|ui| {
                                     ui.allocate_ui_with_layout(egui::vec2(116.0, 28.0), Layout::left_to_right(Align::Center), |ui| theme::pill(ui, r.status.label(), col));
-                                    let prompt = q.map(|q| q.prompt.lines().next().unwrap_or("").to_string()).unwrap_or_default();
+                                    let prompt = q.map(|q| rtl::line(q.prompt.lines().next().unwrap_or(""))).unwrap_or_default();
                                     let w = (ui.available_width() - 70.0).max(60.0);
                                     ui.allocate_ui_with_layout(egui::vec2(w, 28.0), Layout::left_to_right(Align::Center), |ui| {
                                         ui.add(egui::Label::new(format!("Q{}  {prompt}", i + 1)).truncate());
@@ -1547,6 +1672,10 @@ fn question_header(ui: &mut egui::Ui, q: &Question, idx: usize) {
     });
 }
 
+fn fmt_size(bytes: u64) -> String {
+    if bytes < 1024 * 1024 { format!("{:.0} KB", (bytes as f32 / 1024.0).max(1.0)) } else { format!("{:.1} MB", bytes as f32 / (1024.0 * 1024.0)) }
+}
+
 fn option_row(ui: &mut egui::Ui, letter: char, text: &str, on: bool, multiple: bool) -> egui::Response {
     let p = pal();
     let id = ui.next_auto_id();
@@ -1554,7 +1683,7 @@ fn option_row(ui: &mut egui::Ui, letter: char, text: &str, on: bool, multiple: b
     let (fill, stroke) = if on {
         (p.accent_soft, p.accent)
     } else if hovered {
-        (p.surface2, p.border_strong)
+        (p.hover, p.accent.gamma_multiply(0.7))
     } else {
         (p.surface, p.border)
     };
@@ -1576,7 +1705,7 @@ fn option_row(ui: &mut egui::Ui, letter: char, text: &str, on: bool, multiple: b
                     painter.text(r.center(), egui::Align2::CENTER_CENTER, letter, theme::mono(12.5), if on { p.on_accent } else { p.muted });
                 }
                 ui.add_space(4.0);
-                ui.add(egui::Label::new(RichText::new(text).size(15.5)).wrap());
+                rtl::label(ui, text, egui::FontId::proportional(15.5), p.text);
             });
         })
         .response;

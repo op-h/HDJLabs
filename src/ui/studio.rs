@@ -7,7 +7,7 @@ use crate::net::{self, LiveServer, Phase, S2C};
 use crate::payload;
 use crate::runner;
 use crate::storage::{self, Project};
-use crate::ui::editor;
+use crate::ui::{editor, rtl};
 use crate::ui::player::{run_output, test_report};
 use crate::ui::theme::{self, icon, pal};
 use egui::{Align, Color32, CornerRadius, Layout, Margin, RichText, Stroke};
@@ -52,6 +52,9 @@ pub struct Studio {
     firewall_ok: Option<bool>,
     live_started: Option<Instant>,
     confirm_remove_all: bool,
+    confirm_reset_results: bool,
+    /// Teacher-side re-checks of submissions, by attempt id.
+    regrade_jobs: HashMap<String, Receiver<Vec<QuestionResult>>>,
     /// Debug guide recordings: fixed scroll position and caption.
     guide_scroll: Option<f32>,
     guide_caption: Option<String>,
@@ -80,6 +83,8 @@ impl Studio {
             firewall_ok: None,
             live_started: None,
             confirm_remove_all: false,
+            confirm_reset_results: false,
+            regrade_jobs: HashMap::new(),
             guide_scroll: None,
             guide_caption: None,
         }
@@ -240,6 +245,7 @@ impl Studio {
                 }
             }
         }
+        self.tick_regrades();
         let done: Vec<(String, u32)> = self.review_jobs.keys().cloned().collect();
         for k in done {
             if let Some(rx) = self.review_jobs.get(&k) {
@@ -305,9 +311,9 @@ fn nav_item(ui: &mut egui::Ui, icon_: &str, label: &str, active: bool, badge: Op
         painter.rect_filled(rect, CornerRadius::same(theme::R_CONTROL), p.surface2);
         painter.rect_filled(egui::Rect::from_min_size(rect.min + egui::vec2(0.0, 9.0), egui::vec2(2.0, 18.0)), CornerRadius::ZERO, p.accent);
     } else if resp.hovered() {
-        painter.rect_filled(rect, CornerRadius::same(theme::R_CONTROL), p.surface2);
+        painter.rect_filled(rect, CornerRadius::same(theme::R_CONTROL), p.hover);
     }
-    let col = if active { p.text } else { p.muted };
+    let col = if active || resp.hovered() { p.text } else { p.muted };
     painter.text(rect.left_center() + egui::vec2(14.0, 0.0), egui::Align2::LEFT_CENTER, icon_, egui::FontId::proportional(14.0), if active { p.accent } else { col });
     painter.text(rect.left_center() + egui::vec2(40.0, 0.0), egui::Align2::LEFT_CENTER, label, if active { theme::semibold(14.0) } else { egui::FontId::proportional(14.0) }, col);
     if let Some(b) = badge {
@@ -341,14 +347,14 @@ impl Studio {
         ui.with_layout(Layout::bottom_up(Align::Min), |ui| {
             ui.label(theme::figure(format!("v{} · OPH", env!("CARGO_PKG_VERSION")), 11.0, p.faint));
             let light = theme::is_light();
-            if ui.add(egui::Button::new(theme::muted(format!("{}  {} theme", if light { icon::MOON } else { icon::SUN }, if light { "Dark" } else { "Light" }))).frame(false)).clicked() {
+            if ui.add(egui::Button::new(theme::muted(format!("{}  {} theme", if light { icon::MOON } else { icon::SUN }, if light { "Dark" } else { "Light" }))).frame_when_inactive(false)).clicked() {
                 theme::set_light(ui.ctx(), !light);
             }
             ui.add_space(8.0);
             ui.separator();
             let state = if self.path.is_none() { "Not saved yet" } else if self.dirty { "Unsaved changes" } else { "All changes saved" };
             theme::status_dot(ui, if self.dirty || self.path.is_none() { p.warning } else { p.success }, state);
-            ui.add(egui::Label::new(RichText::new(&self.project.exam.title).font(theme::semibold(14.0))).truncate());
+            ui.add(egui::Label::new(RichText::new(rtl::line(&self.project.exam.title)).font(theme::semibold(14.0))).truncate());
             ui.label(theme::eyebrow("Current exam"));
         });
     }
@@ -367,7 +373,7 @@ impl Studio {
                 if theme::ghost(ui, &format!("{}  Preview", icon::PLAY)).on_hover_text("Open the exam in a normal window, without lockdown").clicked() {
                     self.preview();
                 }
-                if ui.add(egui::Button::new(theme::muted(format!("{}  Save", icon::SAVE))).frame(false)).on_hover_text("Ctrl+S").clicked() {
+                if ui.add(egui::Button::new(theme::muted(format!("{}  Save", icon::SAVE))).frame_when_inactive(false)).on_hover_text("Ctrl+S").clicked() {
                     self.save(false);
                 }
             });
@@ -392,13 +398,13 @@ impl Studio {
                     ui.add(egui::Label::new(RichText::new("Students run the file, enter the password you announce, and the PC stays inside the exam until they submit. Results come back over the classroom network — no internet, no accounts.").size(15.0).color(p.muted)).wrap());
                     ui.add_space(22.0);
                     ui.horizontal(|ui| {
-                        if ui.add(egui::Button::new(RichText::new(format!("{}  New exam", icon::ADD)).font(theme::semibold(14.5)).color(p.on_accent)).fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(0.0, 38.0))).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(format!("{}  New exam", icon::ADD)).font(theme::semibold(14.5)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(0.0, 38.0))).clicked() {
                             self.new_project();
                         }
-                        if ui.add(egui::Button::new(RichText::new(format!("{}  Open project", icon::OPEN)).font(theme::semibold(14.5))).fill(Color32::TRANSPARENT).stroke(Stroke::new(1.0_f32, p.border_strong)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(0.0, 38.0))).clicked() {
+                        if ui.add(egui::Button::new(RichText::new(format!("{}  Open project", icon::OPEN)).font(theme::semibold(14.5))).fill(theme::clear_fill(ui)).stroke(theme::outline(ui, p.border_strong)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(0.0, 38.0))).clicked() {
                             self.open_dialog();
                         }
-                        if ui.add(egui::Button::new(RichText::new("Load the sample exam").color(p.accent)).frame(false)).on_hover_text("Six questions covering every type, including two code questions").clicked() {
+                        if ui.add(egui::Button::new(RichText::new("Load the sample exam").color(p.accent)).frame_when_inactive(false)).on_hover_text("Six questions covering every type, including two code questions").clicked() {
                             self.new_project();
                             self.project.exam = sample_exam();
                             self.selected = Some(0);
@@ -417,7 +423,7 @@ impl Studio {
                         let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 44.0), egui::Sense::click());
                         let painter = ui.painter();
                         if resp.hovered() {
-                            painter.rect_filled(rect, CornerRadius::same(theme::R_CONTROL), p.surface2);
+                            painter.rect_filled(rect, CornerRadius::same(theme::R_CONTROL), p.hover);
                         }
                         painter.line_segment([rect.left_bottom(), rect.right_bottom()], Stroke::new(1.0_f32, p.border));
                         painter.text(rect.left_center() + egui::vec2(10.0, -8.0), egui::Align2::LEFT_CENTER, &name, theme::semibold(14.0), p.text);
@@ -475,7 +481,7 @@ impl Studio {
                     let id = self.project.exam.next_question_id();
                     let mut add = None;
                     let p = pal();
-                    let menu_btn = egui::Button::new(RichText::new(format!("{}  Add question", icon::ADD)).font(theme::semibold(14.0)).color(p.on_accent)).fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(list_w, 36.0));
+                    let menu_btn = egui::Button::new(RichText::new(format!("{}  Add question", icon::ADD)).font(theme::semibold(14.0)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(list_w, 36.0));
                     egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
                         ui.set_min_width(list_w - 8.0);
                         for (label, hint, kind) in [
@@ -483,8 +489,9 @@ impl Studio {
                             ("True / False", "A statement to judge", 1),
                             ("Short answer", "A word, number or flag — TryHackMe style", 2),
                             ("Code", "Python, JavaScript, SQL, HTML/CSS/JS, C, C++, Java, Go, Rust", 3),
+                            ("File upload", "Students attach a file you grade. Needs lockdown off", 4),
                         ] {
-                            let r = ui.add(egui::Button::new(RichText::new(label).font(theme::semibold(14.0))).frame(false).min_size(egui::vec2(ui.available_width(), 24.0))).on_hover_text(hint);
+                            let r = ui.add(egui::Button::new(RichText::new(label).font(theme::semibold(14.0))).frame_when_inactive(false).min_size(egui::vec2(ui.available_width(), 24.0))).on_hover_text(hint);
                             ui.label(theme::muted(hint).size(12.0));
                             ui.add_space(4.0);
                             if r.clicked() {
@@ -492,6 +499,7 @@ impl Studio {
                                     0 => Kind::Choice { options: vec![String::new(), String::new(), String::new(), String::new()], correct: vec![0], multiple: false },
                                     1 => Kind::TrueFalse { answer: true },
                                     2 => Kind::Short { accepted: vec![String::new()], case_sensitive: false, show_format: true },
+                                    4 => Kind::Upload { extensions: vec!["pdf".into(), "docx".into(), "zip".into()], max_mb: 2.0 },
                                     _ => Kind::Code(CodeSpec::new(Lang::Python)),
                                 });
                             }
@@ -532,7 +540,8 @@ impl Studio {
                                         ui.label(theme::muted(format!("{} pt", theme::fmt_points(q.points))).size(12.5));
                                     });
                                 });
-                                let first = q.prompt.lines().next().unwrap_or("");
+                                let first_line = rtl::line(q.prompt.lines().next().unwrap_or(""));
+                                let first = first_line.as_str();
                                 let mut snippet: String = first.chars().take(72).collect();
                                 if first.chars().count() > 72 {
                                     snippet = format!("{}…", snippet.trim_end());
@@ -555,7 +564,11 @@ impl Studio {
                                     });
                                 }
                             });
-                        if fr.response.interact(egui::Sense::click()).clicked() {
+                        let card = fr.response.interact(egui::Sense::click());
+                        if card.hovered() && !sel {
+                            ui.painter().rect_stroke(card.rect, CornerRadius::same(theme::R_PANEL), Stroke::new(1.0_f32, p.accent.gamma_multiply(0.7)), egui::StrokeKind::Inside);
+                        }
+                        if card.clicked() {
                             self.selected = Some(i);
                         }
                         ui.add_space(4.0);
@@ -611,6 +624,8 @@ impl Studio {
         let p = pal();
         let mut q = self.project.exam.questions[i].clone();
         let before = q.clone();
+        let locked = self.project.exam.settings.lockdown;
+        let mut unlock = false;
         let mut ref_run = false;
         // Guide recordings show the solution section open.
         let force_solution_open = self.guide_scroll.is_some() && matches!(&q.kind, Kind::Code(c) if !c.reference.is_empty());
@@ -627,6 +642,15 @@ impl Studio {
             ui.add_space(4.0);
             theme::field_label(ui, "Prompt");
             ui.add(egui::TextEdit::multiline(&mut q.prompt).hint_text("Write the question…").desired_rows(4).desired_width(theme::fill(&ui, 12)).margin(Margin::same(12)));
+            if rtl::has_rtl(&q.prompt) {
+                // The editor shows Arabic letters unjoined; this is exactly what students will see.
+                ui.label(theme::eyebrow("Students see"));
+                let p = pal();
+                egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::same(10)).show(ui, |ui| {
+                    ui.set_width(ui.available_width());
+                    rtl::label(ui, &q.prompt, egui::FontId::proportional(15.0), p.text);
+                });
+            }
             ui.add_space(8.0);
             match &mut q.kind {
                 Kind::Choice { options, correct, multiple } => {
@@ -665,6 +689,25 @@ impl Studio {
                     if options.len() < 10 && ui.button(format!("{}  Add option", icon::ADD)).clicked() {
                         options.push(String::new());
                     }
+                }
+                Kind::Upload { extensions, max_mb } => {
+                    if locked {
+                        egui::Frame::new().fill(p.warning.gamma_multiply(0.10)).stroke(Stroke::new(1.0_f32, p.warning.gamma_multiply(0.6))).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.add(egui::Label::new(RichText::new(format!("{}  File uploads need lockdown off: a locked exam never opens a file window. This exam can't be exported until lockdown is off.", icon::WARNING)).color(p.warning)).wrap());
+                            if theme::ghost(ui, "Turn lockdown off").clicked() {
+                                unlock = true;
+                            }
+                        });
+                    }
+                    theme::field_label(ui, "Allowed file types (comma separated, empty = any)");
+                    let mut list = extensions.join(", ");
+                    if ui.add(egui::TextEdit::singleline(&mut list).hint_text("pdf, docx, zip").desired_width(theme::fill(&ui, 10)).margin(Margin::symmetric(10, 7))).changed() {
+                        *extensions = list.split([',', ' ', ';']).map(|e| e.trim().trim_start_matches('.').to_lowercase()).filter(|e| !e.is_empty()).collect();
+                    }
+                    theme::field_label(ui, "Largest file");
+                    ui.add(egui::DragValue::new(max_mb).range(0.1..=MAX_UPLOAD_MB).speed(0.1).suffix(" MB"));
+                    ui.label(theme::muted(format!("Up to {} MB per student in total, so it travels through the classroom network with the submission. Grade it in Results.", theme::fmt_points(MAX_UPLOAD_MB))).size(12.5));
                 }
                 Kind::TrueFalse { answer } => {
                     theme::field_label(ui, "Correct answer");
@@ -875,6 +918,10 @@ impl Studio {
         if q != before {
             self.exam().questions[i] = q;
         }
+        if unlock {
+            self.exam().settings.lockdown = false;
+            self.toast("Lockdown is off for this exam. Students can use other apps while it's open.", false);
+        }
     }
 
     // ───────────── Settings & export ─────────────
@@ -933,6 +980,8 @@ impl Studio {
                     });
                     ui.checkbox(&mut e.settings.show_score, "Show the score when the student submits");
                     ui.checkbox(&mut e.settings.show_review, "Show per-question results after submitting");
+                    ui.checkbox(&mut e.settings.keep_answers_off_pcs, "Keep the answer key off student PCs").on_hover_text("The exported exam carries no correct answers or hidden tests. Your Studio grades each submission and sends the score back over the classroom network, so keep the Live classroom running.");
+                    ui.checkbox(&mut e.settings.hold_scores, "Students wait for me to finish grading before they see a score").on_hover_text("Scores always wait when an answer needs your grading (code without tests, HTML). Turn this on to hold every score until you press \"Finish grading & send score\" in Results.");
                 });
                 theme::card(&mut cols[1], |ui| {
                     ui.set_width(ui.available_width());
@@ -1004,6 +1053,13 @@ impl Studio {
             let server = LiveServer::start(self.project.exam.id.clone(), self.project.teacher_secret.clone(), self.project.exam.author.clone(), self.project.exam.settings.lan_port, share, move || ctx.request_repaint());
             for e in &server.errors {
                 self.toasts.push(Toast { text: e.clone(), at: Instant::now(), error: true });
+            }
+            {
+                // Scores sent in an earlier session reach students whose exam reconnects now.
+                let mut st = server.state.lock().unwrap();
+                for r in self.project.results.iter().filter(|r| r.released) {
+                    st.release_grade(&r.submission.attempt_id, r.final_results(), r.total());
+                }
             }
             self.live = Some(server);
             self.live_started = Some(Instant::now());
@@ -1137,7 +1193,7 @@ impl Studio {
         ui.add_space(6.0);
         ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                if ui.add(egui::Button::new(RichText::new(format!("{}  Remove exam from PCs", icon::DELETE)).color(p.danger)).fill(Color32::TRANSPARENT).min_size(egui::vec2(0.0, 34.0))).on_hover_text("Deletes the exam file from every connected student PC when its exam closes. Students still working are not interrupted.").clicked() {
+                if ui.add(egui::Button::new(RichText::new(format!("{}  Remove exam from PCs", icon::DELETE)).color(p.danger)).fill(theme::clear_fill(ui)).min_size(egui::vec2(0.0, 34.0))).on_hover_text("Deletes the exam file from every connected student PC when its exam closes. Students still working are not interrupted.").clicked() {
                     self.confirm_remove_all = true;
                 }
                 if theme::ghost(ui, &format!("{}  +5 min all", icon::CLOCK)).clicked() {
@@ -1174,7 +1230,7 @@ impl Studio {
                             ui.end_row();
                             for s in &students {
                                 let sel = self.live_selected.as_deref() == Some(s.attempt_id.as_str());
-                                let name = ui.add(egui::Button::new(RichText::new(&s.name).font(theme::semibold(14.0)).color(if sel { p.accent } else { p.text })).frame(false)).on_hover_text(format!("ID {} · {} · {}", s.student_id, s.machine, s.addr));
+                                let name = ui.add(egui::Button::new(RichText::new(&s.name).font(theme::semibold(14.0)).color(if sel { p.accent } else { p.text })).frame_when_inactive(false)).on_hover_text(format!("ID {} · {} · {}", s.student_id, s.machine, s.addr));
                                 if name.clicked() {
                                     self.live_selected = if sel { None } else { Some(s.attempt_id.clone()) };
                                 }
@@ -1311,6 +1367,56 @@ impl Studio {
     }
 
     /// Shows one answer (with live grading for static types and a test runner for code).
+    /// The teacher's grading controls for one code answer: quick marks plus exact points.
+    fn grade_row(&mut self, ui: &mut egui::Ui, ri: usize, q: &Question) {
+        let p = pal();
+        let r = &mut self.project.results[ri];
+        let auto = r.auto(q.id).cloned();
+        let manual = r.overrides.get(&q.id).copied();
+        let needs = manual.is_none() && auto.as_ref().is_some_and(|a| a.status == Status::Review);
+        let mut changed = false;
+        ui.add_space(6.0);
+        egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, if needs { p.warning.gamma_multiply(0.7) } else { p.border })).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::eyebrow("Grade"));
+                match (manual, &auto) {
+                    (Some(v), _) => theme::pill(ui, &format!("Graded {} / {}", theme::fmt_points(v), theme::fmt_points(q.points)), p.accent),
+                    (None, Some(a)) if a.status == Status::Review => theme::pill(ui, "Needs grading", p.warning),
+                    (None, Some(a)) => theme::pill(ui, &format!("Auto {} / {}{}", theme::fmt_points(a.earned), theme::fmt_points(q.points), if a.tests_total > 0 { format!("  ({}/{} tests)", a.tests_passed, a.tests_total) } else { String::new() }), p.muted),
+                    (None, None) => theme::pill(ui, "Not answered", p.muted),
+                };
+                ui.add_space(6.0);
+                let mut set = None;
+                if theme::ghost(ui, &format!("{}  Full marks", icon::CHECK)).clicked() {
+                    set = Some(q.points);
+                }
+                if theme::ghost(ui, "Half").clicked() {
+                    set = Some((q.points * 50.0).round() / 100.0);
+                }
+                if theme::ghost(ui, "Zero").clicked() {
+                    set = Some(0.0);
+                }
+                let mut v = manual.or(auto.as_ref().map(|a| a.earned)).unwrap_or(0.0);
+                if ui.add(egui::DragValue::new(&mut v).range(0.0..=q.points).speed(0.25).suffix(format!(" / {} pts", theme::fmt_points(q.points)))).on_hover_text("Exact points").changed() {
+                    set = Some(v);
+                }
+                if manual.is_some() && ui.add(egui::Button::new(theme::muted("Undo")).frame_when_inactive(false)).on_hover_text("Go back to the automatic result").clicked() {
+                    r.overrides.remove(&q.id);
+                    changed = true;
+                }
+                if let Some(v) = set {
+                    r.overrides.insert(q.id, v.clamp(0.0, q.points));
+                    changed = true;
+                }
+            });
+        });
+        if changed {
+            r.released = false;
+            self.dirty = true;
+        }
+    }
+
     fn answer_view(&mut self, ui: &mut egui::Ui, attempt: &str, idx: usize, q: &Question, a: &Answer, result_idx: Option<usize>) {
         let p = pal();
         let auto = if matches!(q.kind, Kind::Code(_)) { None } else { Some(grading::grade_static(q, a)) };
@@ -1320,20 +1426,21 @@ impl Studio {
                 ui.label(RichText::new(format!("Q{}", idx + 1)).font(theme::semibold(14.0)).color(p.accent));
                 let prompt_w = (ui.available_width() - 150.0).max(60.0);
                 ui.allocate_ui_with_layout(egui::vec2(prompt_w, 22.0), Layout::left_to_right(Align::Center), |ui| {
-                    ui.add(egui::Label::new(q.prompt.lines().next().unwrap_or("")).truncate());
+                    ui.add(egui::Label::new(rtl::line(q.prompt.lines().next().unwrap_or(""))).truncate());
                 });
                 ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                     if let Some(ri) = result_idx {
                         let r = &mut self.project.results[ri];
-                        let auto_pts = r.submission.results.iter().find(|x| x.qid == q.id).map(|x| x.earned).unwrap_or(0.0);
+                        let auto_pts = r.auto(q.id).map(|x| x.earned).unwrap_or(0.0);
                         let mut v = r.earned(q.id);
                         let changed = ui.add(egui::DragValue::new(&mut v).range(0.0..=q.points).speed(0.25).suffix(format!(" / {}", theme::fmt_points(q.points)))).on_hover_text("Override the points for this answer").changed();
                         if changed {
-                            if (v - auto_pts).abs() < 0.001 {
+                            if (v - auto_pts).abs() < 0.001 && r.auto(q.id).is_some_and(|x| x.status != Status::Review) {
                                 r.overrides.remove(&q.id);
                             } else {
                                 r.overrides.insert(q.id, v);
                             }
+                            r.released = false;
                             self.dirty = true;
                         }
                         if r.overrides.contains_key(&q.id) {
@@ -1363,6 +1470,28 @@ impl Studio {
                 }
                 (_, Answer::Text(t)) => {
                     ui.label(RichText::new(t).monospace());
+                }
+                (_, Answer::File { name, size, data }) => {
+                    ui.horizontal(|ui| {
+                        ui.label(RichText::new(icon::DOC).size(18.0).color(p.accent));
+                        ui.label(RichText::new(name).font(theme::semibold(14.0)));
+                        ui.label(theme::muted(format!("{:.1} KB", *size as f32 / 1024.0)).size(12.5));
+                        if data.is_empty() {
+                            ui.label(theme::muted("(arrives with the submission)").size(12.5));
+                        } else if theme::ghost(ui, &format!("{}  Save file", icon::DOWNLOAD)).clicked() {
+                            let suggested = net::sanitize_file_name(name);
+                            if let Some(out) = rfd::FileDialog::new().set_file_name(suggested).save_file() {
+                                match crate::crypto::unb64(data).map(|b| std::fs::write(&out, b)) {
+                                    Ok(Ok(())) => self.toast(format!("Saved {}", out.display()), false),
+                                    Ok(Err(e)) => self.toast(e.to_string(), true),
+                                    Err(_) => self.toast("The file is damaged.", true),
+                                }
+                            }
+                        }
+                    });
+                    if let Some(ri) = result_idx {
+                        self.grade_row(ui, ri, q);
+                    }
                 }
                 (Kind::Code(spec), Answer::Code { lang, source }) => {
                     let lines = source.lines().count().clamp(4, 22) as f32;
@@ -1402,6 +1531,9 @@ impl Studio {
                             test_report(ui, r);
                         }
                     }
+                    if let Some(ri) = result_idx {
+                        self.grade_row(ui, ri, q);
+                    }
                 }
                 _ => {
                     ui.label(theme::muted("(answer type does not match the question)"));
@@ -1409,6 +1541,35 @@ impl Studio {
             }
         });
         ui.add_space(6.0);
+    }
+
+    /// Re-checks every new submission with the full exam (a few at a time), then sends the score
+    /// on its own when nothing needs the teacher and the answers never left this PC.
+    fn tick_regrades(&mut self) {
+        let finished: Vec<(String, Vec<QuestionResult>)> = self.regrade_jobs.iter().filter_map(|(k, rx)| rx.try_recv().ok().map(|v| (k.clone(), v))).collect();
+        for (attempt, results) in finished {
+            self.regrade_jobs.remove(&attempt);
+            let Some(ri) = self.project.results.iter().position(|r| r.submission.attempt_id == attempt) else { continue };
+            self.project.results[ri].regraded = Some(results);
+            self.dirty = true;
+            let s = &self.project.exam.settings;
+            let r = &self.project.results[ri];
+            if s.keep_answers_off_pcs && !s.hold_scores && r.pending_review() == 0 && !r.released {
+                if let Some(live) = &self.live {
+                    live.state.lock().unwrap().release_grade(&attempt, r.final_results(), r.total());
+                    self.project.results[ri].released = true;
+                }
+            }
+        }
+        while self.regrade_jobs.len() < 4 {
+            let Some(r) = self.project.results.iter().find(|r| r.regraded.is_none() && !self.regrade_jobs.contains_key(&r.submission.attempt_id)) else { break };
+            let (tx, rx) = mpsc::channel();
+            let (exam, sub) = (self.project.exam.clone(), r.submission.clone());
+            self.regrade_jobs.insert(sub.attempt_id.clone(), rx);
+            std::thread::spawn(move || {
+                let _ = tx.send(grading::regrade(&exam, &sub));
+            });
+        }
     }
 
     // ───────────── Results ─────────────
@@ -1421,6 +1582,9 @@ impl Studio {
                 ui.label(theme::muted("Live submissions land here automatically. Import .hdjr files collected by USB."));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if !self.project.results.is_empty() && theme::danger(ui, &format!("{}  Reset results", icon::DELETE)).on_hover_text("Delete every result in this project").clicked() {
+                    self.confirm_reset_results = true;
+                }
                 if ui.add_enabled(!self.project.results.is_empty(), egui::Button::new(format!("{}  Export CSV", icon::DOWNLOAD)).min_size(egui::vec2(0.0, 36.0))).clicked() {
                     let name = format!("{} results.csv", net::sanitize_file_name(&self.project.exam.title));
                     if let Some(out) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name(name).save_file() {
@@ -1452,6 +1616,7 @@ impl Studio {
             });
         });
         ui.add_space(12.0);
+        self.reset_results_modal(ui.ctx());
         if self.project.results.is_empty() {
             theme::card(ui, |ui| {
                 ui.set_width(ui.available_width());
@@ -1475,23 +1640,30 @@ impl Studio {
         ui.horizontal_top(|ui| {
             let left_w = if self.result_selected.is_some() { ui.available_width() * 0.45 } else { ui.available_width() };
             ui.allocate_ui_with_layout(egui::vec2(left_w, ui.available_height()), Layout::top_down(Align::Min), |ui| {
-                egui::ScrollArea::vertical().id_salt("results-list").auto_shrink([false, false]).show(ui, |ui| {
+                egui::ScrollArea::both().id_salt("results-list").auto_shrink([false, false]).show(ui, |ui| {
                     theme::card_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
-                        egui::Grid::new("results-grid").num_columns(5).striped(true).spacing([16.0, 10.0]).show(ui, |ui| {
-                            for h in ["Student", "Score", "%", "Alerts", "Submitted"] {
+                        egui::Grid::new("results-grid").num_columns(6).striped(true).spacing([16.0, 10.0]).show(ui, |ui| {
+                            for h in ["Student", "Score", "%", "Grading", "Alerts", "Submitted"] {
                                 ui.label(theme::eyebrow(h));
                             }
                             ui.end_row();
                             for (i, r) in self.project.results.iter().enumerate() {
                                 let s = &r.submission;
                                 let sel = self.result_selected == Some(i);
-                                if ui.add(egui::Button::new(RichText::new(&s.student_name).font(theme::semibold(14.0)).color(if sel { p.accent } else { p.text })).frame(false)).on_hover_text(format!("ID {} · {}", s.student_id, s.machine)).clicked() {
+                                if ui.add(egui::Button::new(RichText::new(rtl::line(&s.student_name)).font(theme::semibold(14.0)).color(if sel { p.accent } else { p.text })).frame_when_inactive(false)).on_hover_text(format!("ID {} · {}", s.student_id, s.machine)).clicked() {
                                     self.result_selected = if sel { None } else { Some(i) };
                                 }
                                 ui.label(theme::figure(format!("{} / {}", theme::fmt_points(r.total()), theme::fmt_points(s.max_score)), 13.0, p.text));
                                 let pct = r.percent();
                                 ui.label(theme::figure(format!("{pct:.0}%"), 13.0, if pct >= 50.0 { p.success } else { p.danger }));
+                                match r.pending_review() {
+                                    _ if r.regraded.is_none() => theme::pill(ui, "Checking…", p.muted),
+                                    _ if r.mismatch() && !self.project.exam.settings.keep_answers_off_pcs => theme::pill(ui, &format!("{}  Score changed", icon::WARNING), p.danger).on_hover_text("The score the student's PC reported doesn't match this PC's re-check. The re-check counts."),
+                                    0 if r.released => theme::pill(ui, "Sent", p.success),
+                                    0 => theme::pill(ui, "Done", p.muted),
+                                    n => theme::pill(ui, &format!("{n} to grade"), p.warning),
+                                };
                                 if s.violations.is_empty() {
                                     ui.label(theme::muted("—"));
                                 } else {
@@ -1509,7 +1681,7 @@ impl Studio {
                         ui.label(theme::eyebrow("Per question"));
                         ui.label(theme::muted("Average share of points earned").size(12.5));
                         for (i, q) in self.project.exam.questions.iter().enumerate() {
-                            let got: Vec<f32> = self.project.results.iter().filter(|r| r.submission.results.iter().any(|x| x.qid == q.id)).map(|r| if q.points > 0.0 { r.earned(q.id) / q.points } else { 0.0 }).collect();
+                            let got: Vec<f32> = self.project.results.iter().filter(|r| r.auto(q.id).is_some()).map(|r| if q.points > 0.0 { r.earned(q.id) / q.points } else { 0.0 }).collect();
                             if got.is_empty() {
                                 continue;
                             }
@@ -1531,7 +1703,7 @@ impl Studio {
                         let s = self.project.results[ri].submission.clone();
                         let total = self.project.results[ri].total();
                         ui.horizontal(|ui| {
-                            ui.label(theme::heading(&s.student_name, 20.0));
+                            ui.label(theme::heading(&rtl::line(&s.student_name), 20.0));
                             ui.label(theme::muted(format!("{} · {}", s.student_id, s.machine)));
                             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                                 if theme::icon_button(ui, icon::CANCEL, "Close").clicked() {
@@ -1548,6 +1720,10 @@ impl Studio {
                             return;
                         }
                         ui.label(RichText::new(format!("{} / {} points", theme::fmt_points(total), theme::fmt_points(s.max_score))).font(theme::semibold(16.0)));
+                        if self.project.results[ri].mismatch() && !self.project.exam.settings.keep_answers_off_pcs {
+                            ui.label(RichText::new(format!("{}  The score this student's PC reported didn't match the re-check on your PC. The re-check counts; look at the alerts.", icon::WARNING)).color(p.danger));
+                        }
+                        self.grading_bar(ui, ri);
                         if s.forced {
                             ui.label(RichText::new("Submitted automatically (timer / teacher / proctor)").color(p.warning));
                         }
@@ -1570,6 +1746,107 @@ impl Studio {
                 });
             }
         });
+    }
+
+    /// Grading status for one student and the button that sends them their final score.
+    fn grading_bar(&mut self, ui: &mut egui::Ui, ri: usize) {
+        let p = pal();
+        let (pending, released, name, attempt) = {
+            let r = &self.project.results[ri];
+            (r.pending_review(), r.released, r.submission.student_name.clone(), r.submission.attempt_id.clone())
+        };
+        let mut send = false;
+        let mut reset = false;
+        egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+            ui.set_width(ui.available_width());
+            ui.horizontal(|ui| {
+                if pending > 0 {
+                    theme::pill(ui, &format!("{pending} answer(s) to grade"), p.warning);
+                } else if released {
+                    theme::pill(ui, &format!("{}  Score sent", icon::CHECK), p.success);
+                } else {
+                    theme::pill(ui, "Graded, not sent yet", p.accent);
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if ui.add(egui::Button::new(theme::muted("Reset grading")).frame_when_inactive(false)).on_hover_text("Clear every manual grade for this student").clicked() {
+                        reset = true;
+                    }
+                });
+            });
+            let label = if released { format!("{}  Send again", icon::SEND) } else { format!("{}  Finish grading & send score", icon::SEND) };
+            let b = if pending == 0 {
+                let fill = theme::accent_fill(ui);
+                ui.add(egui::Button::new(RichText::new(label).font(theme::semibold(14.0)).color(p.on_accent)).fill(fill).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(ui.available_width(), 34.0)))
+            } else {
+                ui.add_enabled(false, egui::Button::new(label).min_size(egui::vec2(ui.available_width(), 34.0)))
+            };
+            if b.on_hover_text(if pending == 0 { "The student's exam shows the final score" } else { "Grade every answer marked \"Needs grading\" first" }).clicked() {
+                send = true;
+            }
+        });
+        if reset {
+            let r = &mut self.project.results[ri];
+            r.overrides.clear();
+            r.released = false;
+            self.dirty = true;
+        }
+        if send {
+            let (results, score) = {
+                let r = &self.project.results[ri];
+                (r.final_results(), r.total())
+            };
+            match &self.live {
+                Some(live) => {
+                    let mut st = live.state.lock().unwrap();
+                    let online = st.students.iter().any(|s| s.attempt_id == attempt && s.connected);
+                    st.release_grade(&attempt, results, score);
+                    drop(st);
+                    self.project.results[ri].released = true;
+                    self.dirty = true;
+                    self.toast(if online { format!("Score sent to {name}.") } else { format!("{name} isn't connected; the score is sent when their exam reconnects.") }, false);
+                }
+                None => self.toast("Start the Live classroom session to send scores to students.", true),
+            }
+        }
+    }
+
+    fn reset_results_modal(&mut self, ctx: &egui::Context) {
+        if !self.confirm_reset_results {
+            return;
+        }
+        let n = self.project.results.len();
+        let mut close = false;
+        let mut reset = false;
+        egui::Modal::new(egui::Id::new("confirm-reset-results")).frame(theme::card_frame().inner_margin(Margin::same(24))).show(ctx, |ui| {
+            ui.set_width(440.0);
+            ui.label(theme::heading("Reset all results?", 20.0));
+            ui.add(egui::Label::new(theme::muted(format!("This deletes {n} result(s) and your grading from this project. Students' sealed .hdjr backups in Documents are not touched, so you can import them again."))).wrap());
+            ui.add_space(10.0);
+            ui.horizontal(|ui| {
+                if theme::ghost(ui, "Cancel").clicked() {
+                    close = true;
+                }
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if theme::danger(ui, &format!("{}  Reset results", icon::DELETE)).clicked() {
+                        reset = true;
+                        close = true;
+                    }
+                });
+            });
+        });
+        if reset {
+            self.project.results.clear();
+            self.result_selected = None;
+            self.review_results.clear();
+            if let Some(live) = &self.live {
+                live.state.lock().unwrap().clear_submissions();
+            }
+            self.dirty = true;
+            self.toast(format!("Deleted {n} result(s)."), false);
+        }
+        if close {
+            self.confirm_reset_results = false;
+        }
     }
 
     fn draw_toasts(&mut self, ctx: &egui::Context) {
@@ -1660,6 +1937,11 @@ impl Studio {
         }
         self.project.exam = sample_exam();
         self.project.exam.author = "Mr. Hussein · CS101".into();
+        if std::env::var_os("HDJLABS_DEV_UPLOAD").is_some() {
+            let mut q = Question::new(99, Kind::Upload { extensions: vec!["pdf".into(), "docx".into(), "zip".into()], max_mb: 2.0 });
+            q.prompt = "Upload your lab report (PDF or Word).".into();
+            self.project.exam.questions.insert(0, q);
+        }
         self.project.last_export = Some(std::env::temp_dir().join("demo.exe"));
         self.selected = std::env::var("HDJLABS_SHOT_Q").ok().and_then(|v| v.parse().ok()).or(Some(0));
         let e = self.project.exam.clone();
@@ -1668,12 +1950,21 @@ impl Studio {
             answers.insert(1, Answer::Choice(vec![1]));
             answers.insert(2, Answer::Choice(vec![0, 2]));
             answers.insert(4, Answer::Text("def".into()));
+            if let Some(w) = e.questions.iter().find(|q| matches!(&q.kind, Kind::Code(c) if c.lang.is_preview_only())) {
+                answers.insert(w.id, Answer::Code { lang: Lang::Web, source: "<h1>My profile</h1>
+<p>Hi, I'm learning HTML.</p>
+".into() });
+            }
             answers.insert(5, Answer::Code { lang: Lang::Python, source: "n = int(input())\ntotal = 0\nfor i in range(1, n + 1):\n    total += i\nprint(total)\n".into() });
             let results: Vec<QuestionResult> = e
                 .questions
                 .iter()
                 .enumerate()
-                .map(|(i, q)| QuestionResult { qid: q.id, earned: if i < correct { q.points } else { 0.0 }, max: q.points, status: if i < correct { Status::Correct } else { Status::Wrong }, tests_passed: 0, tests_total: 0 })
+                .map(|(i, q)| match &q.kind {
+                    // Manually graded work (HTML pages) waits for the teacher.
+                    Kind::Code(c) if c.lang.is_preview_only() => QuestionResult { qid: q.id, earned: 0.0, max: q.points, status: Status::Review, tests_passed: 0, tests_total: 0 },
+                    _ => QuestionResult { qid: q.id, earned: if i < correct { q.points } else { 0.0 }, max: q.points, status: if i < correct { Status::Correct } else { Status::Wrong }, tests_passed: 0, tests_total: 0 },
+                })
                 .collect();
             Submission {
                 exam_id: e.id.clone(),
@@ -1684,7 +1975,8 @@ impl Studio {
                 machine: format!("LAB-PC-{}", &sid[2..]),
                 started_at: 1_793_000_000,
                 submitted_at: 1_793_001_500,
-                question_order: e.questions.iter().map(|q| q.id).collect(),
+                // Code first so the grading controls are on screen in captures.
+                question_order: e.questions.iter().filter(|q| matches!(q.kind, Kind::Code(_))).chain(e.questions.iter().filter(|q| !matches!(q.kind, Kind::Code(_)))).map(|q| q.id).collect(),
                 answers,
                 score: results.iter().map(|r| r.earned).sum(),
                 results,
@@ -1713,6 +2005,11 @@ impl Studio {
                 for s in subs {
                     self.project.upsert_result(s);
                 }
+                // Demo data: treat the made-up scores as already re-checked.
+                for r in &mut self.project.results {
+                    r.regraded = Some(r.submission.results.clone());
+                }
+                self.project.results[0].released = true;
                 self.result_selected = Some(1);
                 self.page = Page::Results;
             }

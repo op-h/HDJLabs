@@ -163,7 +163,20 @@ pub enum Kind {
         show_format: bool,
     },
     Code(CodeSpec),
+    /// The student attaches a file (report, project zip…). Only allowed with lockdown off, since
+    /// a locked exam never opens a file window. Graded by the teacher.
+    Upload {
+        /// Allowed extensions without the dot (`pdf`, `zip`); empty accepts any file.
+        #[serde(default)]
+        extensions: Vec<String>,
+        /// Largest file accepted, in MB (at most `MAX_UPLOAD_MB`).
+        max_mb: f32,
+    },
 }
+
+/// Upper limit for one uploaded file, and for all of a student's files together, so the
+/// submission still fits through the classroom network in one piece.
+pub const MAX_UPLOAD_MB: f32 = 3.0;
 
 impl Kind {
     pub fn label(&self) -> &'static str {
@@ -173,6 +186,7 @@ impl Kind {
             Kind::TrueFalse { .. } => "True / False",
             Kind::Short { .. } => "Short answer",
             Kind::Code(_) => "Code",
+            Kind::Upload { .. } => "File upload",
         }
     }
 }
@@ -208,6 +222,12 @@ pub struct Settings {
     /// Delete the exam .exe from the student's PC once they have submitted.
     #[serde(default)]
     pub remove_after_submit: bool,
+    /// Students see their score only after the teacher finishes grading and sends it.
+    #[serde(default)]
+    pub hold_scores: bool,
+    /// Ship the exam without correct answers or hidden tests; the teacher's Studio grades.
+    #[serde(default)]
+    pub keep_answers_off_pcs: bool,
 }
 
 impl Default for Settings {
@@ -225,6 +245,8 @@ impl Default for Settings {
             block_remote_tools: true,
             lan_port: crate::net::DEFAULT_TCP_PORT,
             remove_after_submit: false,
+            hold_scores: false,
+            keep_answers_off_pcs: false,
         }
     }
 }
@@ -275,9 +297,22 @@ impl Exam {
         let mut e = self.clone();
         e.settings.exam_password.clear();
         e.settings.exit_password.clear();
+        let strip = e.settings.keep_answers_off_pcs;
         for q in &mut e.questions {
-            if let Kind::Code(c) = &mut q.kind {
-                c.reference.clear();
+            match &mut q.kind {
+                Kind::Code(c) => {
+                    c.reference.clear();
+                    if strip {
+                        c.tests.retain(|t| !t.hidden);
+                    }
+                }
+                Kind::Choice { correct, .. } if strip => correct.clear(),
+                Kind::TrueFalse { answer } if strip => *answer = false,
+                // Only the answer's shape (`***{****}`) travels, for the format hint.
+                Kind::Short { accepted, show_format, .. } if strip => {
+                    *accepted = if *show_format { accepted.iter().find(|a| !a.trim().is_empty()).map(|a| vec![answer_format(a)]).unwrap_or_default() } else { vec![] };
+                }
+                _ => {}
             }
         }
         e
@@ -314,6 +349,9 @@ impl Exam {
                         out.push(format!("Question {n} has no accepted answer."));
                     }
                 }
+                Kind::Upload { .. } if self.settings.lockdown => {
+                    out.push(format!("Question {n} is a file upload: turn off lockdown in Settings (a locked exam never opens a file window)."));
+                }
                 _ => {}
             }
         }
@@ -329,6 +367,8 @@ pub enum Answer {
     Bool(bool),
     Text(String),
     Code { lang: Lang, source: String },
+    /// An uploaded file. `data` is base64; it is left out of live progress updates.
+    File { name: String, size: u64, data: String },
 }
 
 impl Answer {
@@ -339,6 +379,7 @@ impl Answer {
             Answer::Bool(_) => true,
             Answer::Text(t) => !t.trim().is_empty(),
             Answer::Code { source, .. } => !source.trim().is_empty(),
+            Answer::File { name, .. } => !name.is_empty(),
         }
     }
 }

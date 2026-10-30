@@ -13,18 +13,68 @@ pub struct StoredResult {
     /// Teacher's manual points per question id (overrides the automatic score).
     #[serde(default)]
     pub overrides: BTreeMap<u32, f32>,
+    /// The teacher finished grading and the final score was sent to the student.
+    #[serde(default)]
+    pub released: bool,
+    /// Results the teacher's Studio worked out from the answers with the full exam. These are
+    /// what count: the student's own results only fill in until the re-check finishes.
+    #[serde(default)]
+    pub regraded: Option<Vec<QuestionResult>>,
 }
 
 impl StoredResult {
+    /// Automatic results: the teacher's re-check when it's done, otherwise the student's.
+    pub fn results(&self) -> &[QuestionResult] {
+        self.regraded.as_deref().unwrap_or(&self.submission.results)
+    }
+
+    pub fn auto(&self, qid: u32) -> Option<&QuestionResult> {
+        self.results().iter().find(|r| r.qid == qid)
+    }
+
     pub fn earned(&self, qid: u32) -> f32 {
         if let Some(v) = self.overrides.get(&qid) {
             return *v;
         }
-        self.submission.results.iter().find(|r| r.qid == qid).map(|r| r.earned).unwrap_or(0.0)
+        self.auto(qid).map(|r| r.earned).unwrap_or(0.0)
     }
 
     pub fn total(&self) -> f32 {
-        self.submission.results.iter().map(|r| self.earned(r.qid)).sum()
+        self.results().iter().map(|r| self.earned(r.qid)).sum()
+    }
+
+    /// The score the student's PC reported differs from the teacher's re-check.
+    pub fn mismatch(&self) -> bool {
+        let Some(re) = &self.regraded else { return false };
+        let theirs: f32 = self.submission.results.iter().map(|r| r.earned).sum();
+        let ours: f32 = re.iter().map(|r| r.earned).sum();
+        (theirs - ours).abs() > 0.01 || (self.submission.score - theirs).abs() > 0.01
+    }
+
+    /// Answers that need the teacher's points (code without tests, HTML) and haven't been graded yet.
+    pub fn pending_review(&self) -> usize {
+        self.results().iter().filter(|r| r.status == Status::Review && !self.overrides.contains_key(&r.qid)).count()
+    }
+
+    /// Per-question results with the teacher's points applied — what the student is sent.
+    pub fn final_results(&self) -> Vec<QuestionResult> {
+        self.results()
+            .iter()
+            .map(|r| {
+                let mut r = r.clone();
+                if let Some(v) = self.overrides.get(&r.qid) {
+                    r.earned = *v;
+                    r.status = if r.max > 0.0 && *v >= r.max - 0.001 {
+                        Status::Correct
+                    } else if *v <= 0.001 {
+                        Status::Wrong
+                    } else {
+                        Status::Partial
+                    };
+                }
+                r
+            })
+            .collect()
     }
 
     pub fn percent(&self) -> f32 {
@@ -75,10 +125,11 @@ impl Project {
             Some(r) if r.submission == sub => false,
             Some(r) => {
                 r.submission = sub;
+                r.regraded = None;
                 true
             }
             None => {
-                self.results.push(StoredResult { submission: sub, overrides: BTreeMap::new() });
+                self.results.push(StoredResult { submission: sub, overrides: BTreeMap::new(), released: false, regraded: None });
                 true
             }
         }
@@ -206,7 +257,7 @@ pub fn results_csv(project: &Project) -> String {
             s.forced
         ));
         for q in qs {
-            if s.results.iter().any(|x| x.qid == q.id) {
+            if r.auto(q.id).is_some() {
                 out.push_str(&format!(",{:.2}", r.earned(q.id)));
             } else {
                 out.push(',');
@@ -279,6 +330,8 @@ mod tests {
         let _ = std::fs::remove_file(&rpath);
         q.results[0].overrides.insert(1, 0.5);
         assert_eq!(q.results[0].total(), 0.5);
+        let fr = q.results[0].final_results();
+        assert_eq!(fr.iter().find(|r| r.qid == 1).map(|r| (r.earned, r.status)), Some((0.5, Status::Partial)));
         assert!(results_csv(&q).contains("\"N\""));
     }
 }

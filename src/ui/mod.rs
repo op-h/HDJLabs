@@ -1,6 +1,7 @@
 pub mod editor;
 pub mod guides;
 pub mod player;
+pub mod rtl;
 pub mod studio;
 pub mod theme;
 pub mod web;
@@ -22,6 +23,13 @@ impl<T: Root> eframe::App for GlApp<T> {
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
         self.0.exit();
+    }
+    /// Debug captures: `HDJLABS_SHOT_POINTER=x,y` parks the pointer there to show hover states.
+    #[cfg(debug_assertions)]
+    fn raw_input_hook(&mut self, _ctx: &egui::Context, raw: &mut egui::RawInput) {
+        if let Some((x, y)) = std::env::var("HDJLABS_SHOT_POINTER").ok().and_then(|v| v.split_once(',').and_then(|(x, y)| Some((x.parse().ok()?, y.parse().ok()?)))) {
+            raw.events.push(egui::Event::PointerMoved(egui::pos2(x, y)));
+        }
     }
 }
 
@@ -52,7 +60,7 @@ fn renderer_marker() -> std::path::PathBuf {
 }
 
 /// CPU rendering: forced by `HDJLABS_RENDERER=software`, or remembered after OpenGL failed here.
-fn software_requested() -> bool {
+pub(crate) fn software_requested() -> bool {
     match std::env::var("HDJLABS_RENDERER").as_deref() {
         Ok("software") => true,
         Ok("opengl") => false,

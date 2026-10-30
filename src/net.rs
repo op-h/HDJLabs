@@ -22,7 +22,7 @@ use std::time::{Duration, Instant};
 pub const DISCOVERY_PORT: u16 = 47810;
 pub const DEFAULT_TCP_PORT: u16 = 47811;
 pub const HTTP_PORT: u16 = 47880;
-const MAX_FRAME: usize = 4 * 1024 * 1024;
+const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_STUDENT_CONNS: usize = 400;
 const MAX_HTTP_CONNS: usize = 48;
 
@@ -83,6 +83,8 @@ pub enum S2C {
     ForceSubmit,
     /// Delete the exam file from this PC when the exam closes.
     RemoveExam,
+    /// The teacher finished grading: final per-question results and score.
+    Graded { results: Vec<QuestionResult>, score: f32 },
     SubmitAck,
     Pong,
 }
@@ -102,8 +104,12 @@ fn read_frame<T: for<'de> Deserialize<'de>>(s: &mut impl Read, c: &mut SessionCi
     if len == 0 || len > MAX_FRAME {
         return Err(std::io::Error::other("bad frame length"));
     }
-    let mut buf = vec![0u8; len];
-    s.read_exact(&mut buf)?;
+    // Grow only as bytes really arrive, so a claimed length can't reserve memory by itself.
+    let mut buf = Vec::new();
+    s.take(len as u64).read_to_end(&mut buf)?;
+    if buf.len() != len {
+        return Err(std::io::Error::new(std::io::ErrorKind::UnexpectedEof, "short frame"));
+    }
     let plain = c.decrypt(&buf).map_err(|_| std::io::Error::other("frame failed authentication"))?;
     serde_json::from_slice(&plain).map_err(std::io::Error::other)
 }
@@ -184,11 +190,13 @@ pub struct LiveState {
     /// PCs whose exam is open and looking for us (from discovery), by IP.
     pub seen_pcs: HashMap<String, Instant>,
     pub downloads: Vec<Download>,
+    /// Grades already sent, by attempt — sent again if that student reconnects.
+    graded: HashMap<String, S2C>,
 }
 
 impl Default for LiveState {
     fn default() -> Self {
-        LiveState { students: vec![], log: vec![], outboxes: HashMap::new(), dirty: false, seen_pcs: HashMap::new(), downloads: vec![] }
+        LiveState { students: vec![], log: vec![], outboxes: HashMap::new(), dirty: false, seen_pcs: HashMap::new(), downloads: vec![], graded: HashMap::new() }
     }
 }
 
@@ -209,6 +217,21 @@ impl LiveState {
         if let Some(tx) = self.outboxes.get(attempt_id) {
             let _ = tx.send(msg);
         }
+    }
+
+    /// Sends a student their final grade, now or as soon as they reconnect.
+    pub fn release_grade(&mut self, attempt_id: &str, results: Vec<QuestionResult>, score: f32) {
+        let msg = S2C::Graded { results, score };
+        self.send(attempt_id, msg.clone());
+        self.graded.insert(attempt_id.to_string(), msg);
+    }
+
+    /// Forgets every submission (used by "Reset results").
+    pub fn clear_submissions(&mut self) {
+        for s in &mut self.students {
+            s.submission = None;
+        }
+        self.graded.clear();
     }
 
     pub fn broadcast(&mut self, msg: S2C) {
@@ -377,6 +400,7 @@ fn serve_student(
     let (attempt_id, name, student_id, machine) = (clean(attempt_id, 64), clean(name, 80), clean(student_id, 40), clean(machine, 64));
 
     let (tx, rx): (Sender<S2C>, Receiver<S2C>) = mpsc::channel();
+    let regrade;
     {
         let mut st = state.lock().unwrap();
         let existing = st.student(&attempt_id).is_some();
@@ -404,11 +428,15 @@ fn serve_student(
         s.addr = addr.ip().to_string();
         s.last_seen = Instant::now();
         st.outboxes.insert(attempt_id.clone(), tx.clone());
+        regrade = st.graded.get(&attempt_id).cloned();
         st.log.push(format!("{name} ({student_id}) connected from {}", addr.ip()));
         st.dirty = true;
     }
     repaint();
     let _ = tx.send(S2C::Welcome { teacher: String::new() });
+    if let Some(g) = regrade {
+        let _ = tx.send(g);
+    }
 
     // Writer thread: everything the teacher sends to this student.
     let mut wstream = stream.try_clone()?;
@@ -678,7 +706,15 @@ impl LanClient {
     }
 
     pub fn answers(&self, answers: std::collections::BTreeMap<u32, Answer>, order: Vec<u32>) {
-        self.outbox.lock().unwrap().answers = Some(C2S::Answers { answers: answers.into_iter().collect(), order });
+        // Uploaded files travel once, inside the submission; live updates carry only name and size.
+        let answers = answers
+            .into_iter()
+            .map(|(k, a)| match a {
+                Answer::File { name, size, .. } => (k, Answer::File { name, size, data: String::new() }),
+                a => (k, a),
+            })
+            .collect();
+        self.outbox.lock().unwrap().answers = Some(C2S::Answers { answers, order });
     }
 
     pub fn event(&self, kind: &str) {
@@ -871,6 +907,126 @@ mod tests {
         assert_eq!(st.students[0].name, "Sara");
         assert_eq!(st.students[0].submission.as_ref().unwrap().score, 3.0);
         assert!(st.log.iter().all(|l| !l.contains("invalid type")), "{:?}", st.log);
+        drop(st);
+
+        // The teacher finishes grading: the student's exam receives the final score.
+        let graded = vec![QuestionResult { qid: 1, earned: 4.0, max: 4.0, status: Status::Correct, tests_passed: 0, tests_total: 0 }];
+        server.state.lock().unwrap().release_grade("att1", graded.clone(), 4.0);
+        let start = Instant::now();
+        let mut got = None;
+        while got.is_none() && start.elapsed() < Duration::from_secs(10) {
+            match client.inbox.recv_timeout(Duration::from_millis(200)) {
+                Ok(S2C::Graded { results, score }) => got = Some((results, score)),
+                _ => {}
+            }
+        }
+        assert_eq!(got, Some((graded, 4.0)), "student should receive the teacher's grade");
+    }
+
+    /// A full lab: 40 students connect, stream answers, submit, and all get their grade back.
+    #[test]
+    fn forty_students_at_once() {
+        const N: usize = 40;
+        let (secret, publ) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let port = 47913;
+        let server = LiveServer::start(exam_id.clone(), secret.clone(), "T".into(), port, None, || {});
+        let clients: Vec<LanClient> = (0..N)
+            .map(|i| {
+                let c = LanClient::start(exam_id.clone(), publ.clone(), vec![], port, Arc::new(Mutex::new(format!("127.0.0.1:{port}"))));
+                let att = format!("att{i}");
+                c.hello(&att, &format!("Student {i}"), &format!("S-{i:02}"));
+                let mut snap = std::collections::BTreeMap::new();
+                snap.insert(1u32, Answer::Code { lang: Lang::Python, source: "print(input()[::-1])
+".repeat(20) });
+                c.answers(snap, vec![1]);
+                let sub = Submission {
+                    exam_id: exam_id.clone(),
+                    exam_title: "t".into(),
+                    attempt_id: att,
+                    student_name: format!("Student {i}"),
+                    student_id: format!("S-{i:02}"),
+                    machine: "m".into(),
+                    started_at: 0,
+                    submitted_at: 1,
+                    question_order: vec![1],
+                    answers: Default::default(),
+                    results: vec![],
+                    score: 0.0,
+                    max_score: 1.0,
+                    violations: vec![],
+                    forced: false,
+                };
+                c.submit(crypto::seal_for(&publ, &exam_id, &serde_json::to_vec(&sub).unwrap()).unwrap());
+                c
+            })
+            .collect();
+        let start = Instant::now();
+        while clients.iter().any(|c| !c.submit_acked()) && start.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        let acked = clients.iter().filter(|c| c.submit_acked()).count();
+        assert_eq!(acked, N, "every submission acknowledged within 60 s (took {:?})", start.elapsed());
+        {
+            let mut st = server.state.lock().unwrap();
+            assert_eq!(st.students.len(), N);
+            assert!(st.students.iter().all(|s| s.submission.is_some() && s.connected));
+            for i in 0..N {
+                st.release_grade(&format!("att{i}"), vec![], i as f32 / 100.0);
+            }
+        }
+        for (i, c) in clients.iter().enumerate() {
+            let deadline = Instant::now() + Duration::from_secs(15);
+            let mut score = None;
+            while score.is_none() && Instant::now() < deadline {
+                if let Ok(S2C::Graded { score: s, .. }) = c.inbox.recv_timeout(Duration::from_millis(200)) {
+                    score = Some(s);
+                }
+            }
+            assert_eq!(score, Some(i as f32 / 100.0), "student {i} gets their own grade");
+        }
+    }
+
+    /// The biggest allowed upload (3 MB) reaches the teacher intact, and live updates carry no file data.
+    #[test]
+    fn largest_upload_fits_through_the_network() {
+        let (secret, publ) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let port = 47914;
+        let server = LiveServer::start(exam_id.clone(), secret.clone(), "T".into(), port, None, || {});
+        let c = LanClient::start(exam_id.clone(), publ.clone(), vec![], port, Arc::new(Mutex::new(format!("127.0.0.1:{port}"))));
+        c.hello("big", "Sara", "S-1");
+        let bytes: Vec<u8> = (0..(MAX_UPLOAD_MB * 1024.0 * 1024.0) as usize).map(|i| (i * 31 % 251) as u8).collect();
+        let file = Answer::File { name: "report.pdf".into(), size: bytes.len() as u64, data: crypto::b64(&bytes) };
+        let mut answers = std::collections::BTreeMap::new();
+        answers.insert(1u32, file.clone());
+        c.answers(answers.clone(), vec![1]);
+        let sub = Submission {
+            exam_id: exam_id.clone(),
+            exam_title: "t".into(),
+            attempt_id: "big".into(),
+            student_name: "Sara".into(),
+            student_id: "S-1".into(),
+            machine: "m".into(),
+            started_at: 0,
+            submitted_at: 1,
+            question_order: vec![1],
+            answers,
+            results: vec![],
+            score: 0.0,
+            max_score: 1.0,
+            violations: vec![],
+            forced: false,
+        };
+        c.submit(crypto::seal_for(&publ, &exam_id, &serde_json::to_vec(&sub).unwrap()).unwrap());
+        let start = Instant::now();
+        while !c.submit_acked() && start.elapsed() < Duration::from_secs(30) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(c.submit_acked(), "a 3 MB upload must get through");
+        let st = server.state.lock().unwrap();
+        let got = st.students[0].submission.as_ref().unwrap().answers.get(&1).cloned();
+        assert_eq!(got, Some(file), "file arrives byte for byte");
     }
 
     #[test]

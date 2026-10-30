@@ -39,6 +39,14 @@ fn main() {
         let mode = args.get(3).map(String::as_str).unwrap_or("0");
         exam.settings.lockdown = mode != "0";
         exam.settings.block_remote_tools = mode == "1";
+        exam.settings.keep_answers_off_pcs = std::env::var_os("HDJLABS_DEV_HIDE_ANSWERS").is_some();
+        if mode == "0" && std::env::var_os("HDJLABS_DEV_UPLOAD").is_some() {
+            let id = exam.questions.iter().map(|q| q.id).max().unwrap_or(0) + 1;
+            let mut q = model::Question::new(id, model::Kind::Upload { extensions: vec!["pdf".into(), "docx".into(), "zip".into()], max_mb: 2.0 });
+            q.prompt = "Upload your lab report (PDF or Word).".into();
+            q.points = 4.0;
+            exam.questions.insert(0, q);
+        }
         let out = std::path::PathBuf::from(&args[2]);
         payload::export(&exam, &public, false, vec!["127.0.0.1".into()], &out).expect("export");
         let mut project = storage::Project::new();
@@ -60,6 +68,9 @@ fn main() {
         let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         let expect: usize = std::env::var("HDJLABS_DEV_EXPECT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
         let remove = std::env::var("HDJLABS_DEV_REMOVE").is_ok();
+        // Like the Studio: re-grade each submission here and send the student their score.
+        let release = std::env::var("HDJLABS_DEV_RELEASE").is_ok();
+        let mut released = std::collections::HashSet::new();
         let (mut seen_log, mut last_summary, mut removed) = (0, String::new(), std::collections::HashSet::new());
         let mut events_seen = std::collections::HashMap::<String, usize>::new();
         while std::time::Instant::now() < end {
@@ -91,6 +102,17 @@ fn main() {
                 last_summary = summary;
             }
             let subs: Vec<String> = st.students.iter().filter(|s| s.submission.is_some()).map(|s| s.attempt_id.clone()).collect();
+            if release {
+                for s in st.students.clone().iter().filter(|s| s.submission.is_some()) {
+                    if released.insert(s.attempt_id.clone()) {
+                        let sub = s.submission.clone().unwrap();
+                        let results = grading::regrade(&project.exam, &sub);
+                        let score: f32 = results.iter().map(|r| r.earned).sum();
+                        println!("re-graded {}: student PC said {}/{}, teacher says {score}/{} — sending", s.name, sub.score, sub.max_score, sub.max_score);
+                        st.release_grade(&s.attempt_id, results, score);
+                    }
+                }
+            }
             if remove {
                 for id in &subs {
                     if removed.insert(id.clone()) {

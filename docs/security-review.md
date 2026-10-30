@@ -1,6 +1,6 @@
 # HDJLabs security review
 
-Scope: HDJLabs 1.1.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
+Scope: HDJLabs 1.2.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
 runner. Review date: 2026-10-30. Tested on Windows 11 (build 26300), and across a VMware LAN with student
 PCs on Windows 7 SP1 and Windows 8.1 (no GPU driver), using the debug and release builds.
 
@@ -31,6 +31,16 @@ PCs on Windows 7 SP1 and Windows 8.1 (no GPU driver), using the debug and releas
 * **Lockdown.** A private Win32 desktop, a low-level keyboard hook, per-user policies, a
   capture-excluded window and pre-flight checks. All system changes are backed up first and
   restored on exit or on the next launch.
+* **Teacher re-check.** The Studio re-grades every submission from the student's answers with
+  the full exam (four at a time, in the background). The score the student's PC reported is
+  only shown until that finishes; a mismatch is flagged as *Score changed*. With *Keep the answer
+  key off student PCs*, the exported exam carries no correct options, no accepted short answers
+  (only their `***{**}` shape when the format hint is on) and no hidden tests.
+* **Uploads.** File-upload questions refuse to export while lockdown is on, and the exam refuses
+  to open a file window when its header says lockdown (the header is AEAD-bound, so it can't be
+  edited). Files are capped at 3 MB per student, travel only inside the sealed submission, and
+  are never part of live progress updates. Frames are read as bytes arrive, so a claimed length
+  can't reserve memory by itself.
 * **Code sandbox.** Every run executes in a Job Object: `ActiveProcessLimit = 1` for student code,
   1 GiB memory, UI restrictions (desktop, handles, clipboard, global atoms, system parameters,
   exit Windows), kill-on-close, a 6 s timeout and a 128 KiB output cap. Processes start suspended
@@ -72,6 +82,14 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | 28 | HTML preview used as an escape route (links, `window.open`, downloads, print, devtools, context menu, browser shortcuts) | Code review | Navigation limited to the page itself; new windows and downloads denied; print and context menu blocked; devtools and browser accelerator keys off |
 | 29 | Exam exe run on a PC without a GPU driver | Live test (Windows 8.1, Basic Display Adapter) | OpenGL unavailable → relaunches with the CPU renderer automatically, inside lockdown |
 | 30 | Missing runtime DLLs on old PCs | `dumpbin /dependents` | No VC++ runtime needed (static CRT); Windows-8-only DLLs are delay-loaded so the binary loads on Windows 7 |
+| 31 | Forged score: a submission claiming full marks for wrong answers | Unit test | Teacher re-check scores it from the answers; the forged score is ignored and flagged |
+| 32 | Answer key in the exported exam with *Keep the answer key off student PCs* | Unit test on the shipped JSON | No correct options, accepted answers or hidden tests present; only the answer shape |
+| 33 | 40 students connecting, submitting and receiving grades at once | Load test on loopback | All 40 acknowledged and each received its own grade |
+| 34 | Largest upload (3 MB) through the encrypted channel | Loopback test | Delivered byte for byte; live updates carry name and size only |
+| 35 | File window in a locked exam | Code review + validation test | Export blocked while lockdown is on; the exam itself refuses uploads when its header says lockdown |
+| 36 | Antivirus | Microsoft Defender scan (signatures of 2026-10-30) of the release Studio and an exported exam | No threats found in either file. Other antivirus products can still differ; see *Prepare the lab PCs* in the classroom guide |
+| 37 | Keep-answers-off exam, live on Windows 7 SP1 and Windows 8.1 (no GPU driver) in lockdown | VMware LAN, release build | Each student PC scored itself 0 (it has no answer key); the teacher re-graded (Windows 7: 1/22 for the one right answer) and both screens showed "Graded by your teacher" with the teacher's score |
+| 38 | HTML preview on a PC without a graphics driver | Live test (Windows 8.1) | Found a bug (see below); after the fix the question shows a notice and every dialog is clickable |
 
 ## Findings fixed during the review
 
@@ -87,19 +105,22 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | Medium | Before sign-in, student PCs reconnected to the teacher every 2 s and showed "Offline". | Clients wait at "Teacher found" until sign-in; clear connection stages. |
 | Medium | "Remove exam" did not delete the file: the command line reached `cmd.exe` with Rust-style `\"` escaping, and the CPU renderer skipped the exit callback. | Raw command line; cleanup runs explicitly before closing. Regression test added. |
 | Low | The HTML preview rendered pages dark (WebView2 auto-dark) unlike a real browser. | Light theme and a zero-specificity white default. |
+| High | On a PC without a graphics driver (Windows 8.1, CPU renderer) the WebView2 window ignored "hide" and stayed on screen invisible, covering the submit dialog and swallowing its clicks. | No live preview under the CPU renderer (a notice explains it); a hidden preview is also shrunk to zero size. Retested live. |
+| Medium | The exam's own score was trusted by the teacher. | Every submission is re-graded on the teacher's PC; mismatches are flagged. Optional answer-free export. |
 
 ## Known limitations
 
 * **Ctrl+Alt+Del cannot be blocked** by any application; it's the Secure Attention Sequence.
   HDJLabs removes everything useful from that screen. *Switch user* can only be hidden by machine
   policy (`HideFastUserSwitching`, needs admin); switching users doesn't close or reveal the exam.
-* **Answers are in the exam file**, encrypted under the exam password, so the exam can grade
-  instantly offline. A student who knows the password and reverse-engineers the exe *during*
-  the exam could extract them, but lockdown leaves no tools to do it with. For high-stakes use,
-  rely on the LAN session and treat on-device scores as provisional.
+* **Answers are in the exam file by default**, encrypted under the exam password, so the exam can
+  grade instantly offline. Tick *Keep the answer key off student PCs* for high-stakes exams: the
+  Studio then grades and sends scores over the LAN (students without a connection get theirs
+  later).
 * **Result files can be forged** by someone who extracts the teacher's public key and writes
-  their own submission. The Live classroom sees the real-time progress and answers, so a forged
-  file wouldn't match what the teacher watched. Prefer live collection.
+  their own submission. The score inside is re-graded on the teacher's PC, so only the answers
+  matter; the Live classroom also saw the answers as they were written. Prefer live collection.
+* **Typing Arabic** shows unjoined letters while typing (display text is shaped correctly).
 * **Student code has network access.** Firewalling it would need admin rights. Use a
   classroom network without internet, which is the intended setup anyway.
 * **Hardware, VMs and other devices** (phones, smart glasses, a second PC) are out of scope. VM

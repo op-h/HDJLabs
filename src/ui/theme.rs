@@ -29,6 +29,10 @@ pub struct Palette {
     pub accent: Color32,
     pub on_accent: Color32,
     pub accent_soft: Color32,
+    /// Accent fill under the pointer.
+    pub accent_hover: Color32,
+    /// Background of a hovered control or row.
+    pub hover: Color32,
     pub success: Color32,
     pub warning: Color32,
     pub danger: Color32,
@@ -50,6 +54,8 @@ pub fn pal() -> Palette {
             accent: Color32::from_rgb(63, 111, 10),
             on_accent: Color32::from_rgb(255, 255, 255),
             accent_soft: Color32::from_rgb(230, 239, 216),
+            accent_hover: Color32::from_rgb(82, 138, 22),
+            hover: Color32::from_rgb(226, 232, 218),
             success: Color32::from_rgb(47, 122, 33),
             warning: Color32::from_rgb(154, 91, 0),
             danger: Color32::from_rgb(192, 50, 45),
@@ -69,6 +75,8 @@ pub fn pal() -> Palette {
             accent: Color32::from_rgb(168, 227, 58),
             on_accent: Color32::from_rgb(11, 14, 13),
             accent_soft: Color32::from_rgb(30, 41, 22),
+            accent_hover: Color32::from_rgb(194, 240, 108),
+            hover: Color32::from_rgb(33, 42, 37),
             success: Color32::from_rgb(130, 214, 92),
             warning: Color32::from_rgb(229, 168, 75),
             danger: Color32::from_rgb(239, 91, 85),
@@ -146,6 +154,8 @@ pub fn install_fonts(ctx: &egui::Context) {
     let mono = add("mono", &["CascadiaMono.ttf", "CascadiaCode.ttf", "consola.ttf"]);
     let mono_bold = add("mono-bold", &["CascadiaMono.ttf", "consolab.ttf"]);
     let symbols = add("symbols", &["seguisym.ttf"]);
+    // Arabic presentation forms (joined letters) for text shaped by `rtl`.
+    let arabic = add("arabic", &["tahoma.ttf", "segoeui.ttf"]);
     fonts.font_data.insert("icons".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/Phosphor.ttf"))));
     let icons = true;
 
@@ -155,6 +165,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     }
     if symbols {
         tail.push("symbols".to_string());
+    }
+    if arabic {
+        tail.push("arabic".to_string());
     }
     let prop = fonts.families.entry(FontFamily::Proportional).or_default();
     if ui {
@@ -227,7 +240,7 @@ pub fn apply_style(ctx: &egui::Context) {
     for (w, fill) in [
         (&mut v.widgets.noninteractive, p.surface),
         (&mut v.widgets.inactive, p.surface2),
-        (&mut v.widgets.hovered, p.surface2),
+        (&mut v.widgets.hovered, p.hover),
         (&mut v.widgets.active, p.accent_soft),
         (&mut v.widgets.open, p.surface2),
     ] {
@@ -240,7 +253,8 @@ pub fn apply_style(ctx: &egui::Context) {
     v.widgets.noninteractive.fg_stroke = Stroke::new(1.0_f32, p.text);
     v.widgets.inactive.bg_stroke = Stroke::new(1.0_f32, p.border);
     v.widgets.inactive.fg_stroke = Stroke::new(1.0_f32, p.text);
-    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.border_strong);
+    v.widgets.hovered.bg_stroke = Stroke::new(1.0_f32, p.accent.gamma_multiply(0.7));
+    v.interact_cursor = Some(egui::CursorIcon::PointingHand);
     v.widgets.hovered.fg_stroke = Stroke::new(1.0_f32, p.text);
     v.widgets.active.bg_stroke = Stroke::new(1.0_f32, p.accent);
     v.widgets.active.fg_stroke = Stroke::new(1.0_f32, p.text);
@@ -274,6 +288,28 @@ pub fn card<R>(ui: &mut egui::Ui, add: impl FnOnce(&mut egui::Ui) -> R) -> R {
     card_frame().show(ui, add).inner
 }
 
+/// Whether the widget about to be added is under the pointer. egui keeps last frame's response,
+/// and buttons take `next_auto_id`, so this lets explicitly coloured controls still react to hover.
+pub fn will_hover(ui: &egui::Ui) -> bool {
+    ui.ctx().read_response(ui.next_auto_id()).is_some_and(|r| r.hovered() && r.enabled())
+}
+
+/// Accent fill that brightens under the pointer.
+pub fn accent_fill(ui: &egui::Ui) -> Color32 {
+    let p = pal();
+    if will_hover(ui) { p.accent_hover } else { p.accent }
+}
+
+/// Transparent fill that gets a soft background under the pointer.
+pub fn clear_fill(ui: &egui::Ui) -> Color32 {
+    if will_hover(ui) { pal().hover } else { Color32::TRANSPARENT }
+}
+
+/// Outline that turns accent under the pointer.
+pub fn outline(ui: &egui::Ui, base: Color32) -> Stroke {
+    Stroke::new(1.0_f32, if will_hover(ui) { pal().accent.gamma_multiply(0.8) } else { base })
+}
+
 fn button(text: RichText, fill: Color32, stroke: Color32) -> egui::Button<'static> {
     egui::Button::new(text).fill(fill).stroke(Stroke::new(1.0_f32, stroke)).corner_radius(CornerRadius::same(R_CONTROL)).min_size(egui::vec2(0.0, 34.0))
 }
@@ -281,24 +317,28 @@ fn button(text: RichText, fill: Color32, stroke: Color32) -> egui::Button<'stati
 /// The one dominant action on a screen.
 pub fn primary(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = pal();
-    ui.add(button(RichText::new(text).font(semibold(14.0)).color(p.on_accent), p.accent, p.accent))
+    let fill = accent_fill(ui);
+    ui.add(button(RichText::new(text).font(semibold(14.0)).color(p.on_accent), fill, fill))
 }
 
-/// Destructive action: outlined in red, filled only on hover by egui's own state.
+/// Destructive action: outlined in red, tinted under the pointer.
 pub fn danger(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = pal();
-    ui.add(button(RichText::new(text).font(semibold(14.0)).color(p.danger), Color32::TRANSPARENT, p.danger.gamma_multiply(0.7)))
+    let h = will_hover(ui);
+    ui.add(button(RichText::new(text).font(semibold(14.0)).color(p.danger), if h { p.danger.gamma_multiply(0.14) } else { Color32::TRANSPARENT }, p.danger.gamma_multiply(if h { 1.0 } else { 0.7 })))
 }
 
 /// Secondary action: outline only.
 pub fn ghost(ui: &mut egui::Ui, text: &str) -> egui::Response {
     let p = pal();
-    ui.add(button(RichText::new(text).color(p.text), Color32::TRANSPARENT, p.border_strong))
+    let h = will_hover(ui);
+    ui.add(button(RichText::new(text).color(p.text), if h { p.hover } else { Color32::TRANSPARENT }, if h { p.accent.gamma_multiply(0.8) } else { p.border_strong }))
 }
 
 pub fn icon_button(ui: &mut egui::Ui, icon: &str, tip: &str) -> egui::Response {
     let p = pal();
-    ui.add(egui::Button::new(RichText::new(icon).size(14.0).color(p.muted)).frame(false).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip)
+    let col = if will_hover(ui) { p.text } else { p.muted };
+    ui.add(egui::Button::new(RichText::new(icon).size(14.0).color(col)).frame_when_inactive(false).min_size(egui::vec2(28.0, 28.0))).on_hover_text(tip)
 }
 
 /// Square status tag with a monospace label — used for state, never for decoration.

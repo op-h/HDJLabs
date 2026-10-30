@@ -136,6 +136,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
+name = "ar-reshaper"
+version = "1.5.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "08dae85b57b725df143d5a2eb92c032dd032f062a636826fda1e1a4b21c40c03"
+
+[[package]]
 name = "arboard"
 version = "3.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2542,8 +2548,9 @@ dependencies = [
 
 [[package]]
 name = "hdjlabs"
-version = "1.1.0"
+version = "1.2.0"
 dependencies = [
+ "ar-reshaper",
  "argon2",
  "base64 0.22.1",
  "boa_engine",
@@ -2565,6 +2572,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
+ "unicode-bidi",
  "windows 0.58.0",
  "winreg 0.55.0",
  "winresource",
@@ -6610,6 +6618,12 @@ name = "unicase"
 version = "2.10.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "357cc3acc6a036009fd6c973ed009037c732d60d0b4f6c673e9041497482a28f"
+
+[[package]]
+name = "unicode-bidi"
+version = "0.3.18"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "5c1cb5db39152898a79168971543b1cb5020dff7fe43c8dc468b0885f5e29df5"
 
 [[package]]
 name = "unicode-casing"

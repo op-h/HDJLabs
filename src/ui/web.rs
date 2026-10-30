@@ -52,6 +52,11 @@ pub struct WebPreview {
 }
 
 impl WebPreview {
+    /// No live preview on this PC (shown instead of the page).
+    pub fn disabled(reason: &str) -> Self {
+        WebPreview { failed: Some(reason.into()), ..Default::default() }
+    }
+
     pub fn begin(&mut self) {
         self.pending = None;
     }
@@ -74,6 +79,9 @@ impl WebPreview {
             if self.visible {
                 if let Some(v) = &self.view {
                     let _ = v.set_visible(false);
+                    // Some WebView2 builds (seen on Windows 8.1) ignore hiding and keep an invisible
+                    // window that swallows clicks; with no size it can't cover anything.
+                    let _ = v.set_bounds(wry::Rect { position: wry::dpi::LogicalPosition::new(0.0, 0.0).into(), size: wry::dpi::LogicalSize::new(0.0, 0.0).into() });
                 }
                 self.visible = false;
             }

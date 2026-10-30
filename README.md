@@ -34,11 +34,11 @@ HDJLabs is one Windows program with two roles.
 
 | Teacher — **HDJLabs Studio** | Student — **the exported exam** |
 |---|---|
-| Write multiple-choice, multiple-answer, true/false, short-answer and **code** questions. | Runs from a single portable `.exe`. Nothing to install. |
+| Write multiple-choice, multiple-answer, true/false, short-answer, **code** and **file upload** questions, in English or Arabic. | Runs from a single portable `.exe`. Nothing to install. |
 | Export the exam as an encrypted `.exe` with an exam password and a proctor exit password. | Locks the PC until submission: other apps, the taskbar, shortcuts and touchpad gestures are blocked. |
 | Run a **Live classroom**: students download the exam from your PC; you see every download, every PC that has it open, and everyone who signed in. | A real code editor. **Python, JavaScript, SQL and HTML/CSS/JS are built in**; C, C++, Java, Go and Rust use compilers already on the PC. |
 | Watch progress and alerts, read each student's code as they write it, message them, add time, end the exam. | Answers autosave, encrypted, and survive crashes and power cuts. |
-| Scores arrive the moment students submit. Override points, re-run code, export CSV, then **remove the exam file from every PC**. | The result goes to the teacher over the LAN and is also saved as a sealed `.hdjr` file for USB collection. |
+| Every submission is re-graded on your PC, so a score can't be faked. Grade code and uploads with one click, **send the final score to the student's screen**, export CSV, then **remove the exam file from every PC**. | The result goes to the teacher over the LAN and is also saved as a sealed `.hdjr` file for USB collection. |
 
 ## Download
 
@@ -47,7 +47,7 @@ HDJLabs is one Windows program with two roles.
 | **[HDJLabs-Setup.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs-Setup.exe)** | For teachers. No admin rights needed: per-user by default, or for all users with an admin. Adds Start-menu and desktop shortcuts, opens `.hdjx` projects, installs the teacher guides, and includes an uninstaller. |
 | **[HDJLabs.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs.exe)** | The same Studio as one portable file. |
 
-Runs on **Windows 7 SP1, 8.1, 10 and 11 (64-bit)**. Nothing else is required: the C runtime is built in, and on PCs with no graphics driver (the "Microsoft Basic Display Adapter") HDJLabs switches to a CPU renderer by itself. If SmartScreen appears, choose **More info → Run anyway**; the files aren't code-signed yet.
+Runs on **Windows 7 SP1, 8.1, 10 and 11 (64-bit)**. Nothing else is required: the C runtime is built in, and on PCs with no graphics driver (the "Microsoft Basic Display Adapter") HDJLabs switches to a CPU renderer by itself. If SmartScreen appears, choose **More info → Run anyway**; the files aren't code-signed yet. Before exam day, run one exported exam on a lab PC to check the lab's antivirus lets it start (see [preparing the lab](docs/classroom-network.md#prepare-the-lab-pcs)).
 
 Open the Studio, click **Load the sample exam** to see every question type, then **Preview** to try it as a student.
 
@@ -57,7 +57,7 @@ Open the Studio, click **Load the sample exam** to see every question type, then
 2. **Export.** In *Settings & export*, set the exam password (announce it when the exam starts) and a proctor exit password (yours only). Then **Export .exe**.
 3. **Share.** Open *Live classroom* and press **Start session**. Windows asks for firewall permission once; the checklist shows when everything is ready. Students open the address shown (for example `http://192.168.1.20:47880`) in any browser and download the exam.
 4. **Run.** Students run the exam. It finds your PC by itself, with no IP addresses to type. They enter their name and the password and appear on your roster with progress, time left, alerts and live answers.
-5. **Grade and clean up.** Choice, true/false and short answers are graded instantly. Code is graded by running every test case, hidden ones included. You can re-run, adjust points and export CSV, then **Remove exam from PCs**, or turn on *Delete the exam file from each student's PC after they submit*.
+5. **Grade and clean up.** Choice, true/false and short answers are graded instantly. Code is graded by running every test case, hidden ones included. Answers that need you (code without tests, HTML pages) show **Needs grading** in *Results*: give *Full marks*, *Half*, *Zero* or exact points, then **Finish grading & send score**. Until then the student's exam shows *Waiting for your teacher to finish grading* instead of a score (turn on *Students wait for me to finish grading* to hold every score). Export CSV, **Reset results** to start over, then **Remove exam from PCs**, or turn on *Delete the exam file from each student's PC after they submit*.
 
 No network? Results are saved as `.hdjr` files in `Documents\HDJLabs Results` and next to the exam file. Import them in *Results*. See **[docs/classroom-network.md](docs/classroom-network.md)** for hotspots, switches and firewall details.
 
@@ -67,6 +67,7 @@ No network? Results are saved as `.hdjr` files in `Documents\HDJLabs Results` an
 |---|---|
 | ![SQL question](docs/screenshots/exam-sql.png) | **SQL.** You write the tables and rows; students see them beside the question and write queries. SQLite is built in. |
 | ![HTML question](docs/screenshots/exam-web.png) | **HTML / CSS / JavaScript.** Students build a page and watch it render as they type (Edge WebView2 on Windows 10/11). Navigation, pop-ups, printing and devtools are blocked. You grade the page in Results. |
+| ![File upload](docs/screenshots/exam-upload.png) | **File upload.** Students attach a report or project (you choose the file types, up to 3 MB). It travels inside the encrypted submission and you save it from Results. Only for exams with lockdown off: a locked exam never opens a file window. |
 | ![Short answer](docs/screenshots/exam-short.png) | **Short answer, TryHackMe style.** Optionally show the answer's shape: letters and digits become `*`, symbols such as `_ { } ! @ #` stay visible, and each character the student types fills one slot (`HDJ{l0c` → `HDJ{l0c***_****!}`). |
 
 | Language | Engine |
@@ -111,7 +112,7 @@ Proctor access on a student PC: **Ctrl+Shift+F12** or the lock icon opens the pr
 
 ## Security
 
-Exams are encrypted with Argon2id + ChaCha20-Poly1305 under the exam password, so nobody can read the questions before you announce it, and any edit to the file breaks it. LAN traffic is end-to-end encrypted and only your Studio can decrypt it, so a student can't impersonate the teacher. Result files are sealed to your project's key. The threat model, limits and penetration-test results, including the multi-PC tests on Windows 7 and 8.1, are in **[docs/security-review.md](docs/security-review.md)**.
+Exams are encrypted with Argon2id + ChaCha20-Poly1305 under the exam password, so nobody can read the questions before you announce it, and any edit to the file breaks it. Your Studio re-grades every submission from the answers, so a score reported by a tampered exam doesn't count; tick *Keep the answer key off student PCs* and the exam file carries no correct answers or hidden tests at all. LAN traffic is end-to-end encrypted and only your Studio can decrypt it, so a student can't impersonate the teacher. Result files are sealed to your project's key. The threat model, limits and penetration-test results, including the multi-PC tests on Windows 7 and 8.1, are in **[docs/security-review.md](docs/security-review.md)**.
 
 ## Build from source
 

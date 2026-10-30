@@ -1,9 +1,9 @@
 ; HDJLabs Studio installer (Inno Setup 6).
-; Build:  ISCC.exe /DAppVersion=1.1.0 /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
+; Build:  ISCC.exe /DAppVersion=1.2.0 /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
 ; Exported exams never need this — they are single portable .exe files.
 
 #ifndef AppVersion
-  #define AppVersion "1.1.0"
+  #define AppVersion "1.2.0"
 #endif
 #ifndef SourceExe
   #define SourceExe "..\target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe"

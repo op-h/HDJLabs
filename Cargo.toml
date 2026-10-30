@@ -1,6 +1,6 @@
 [package]
 name = "hdjlabs"
-version = "1.1.0"
+version = "1.2.0"
 edition = "2021"
 authors = ["OPH <https://github.com/op-h>"]
 description = "HDJLabs — build secure offline exams and run them as locked-down Windows apps over the classroom LAN"
@@ -36,6 +36,8 @@ rusqlite = { version = "0.31", features = ["bundled"] }
 wry = { version = "0.53", default-features = false, features = ["os-webview"] }
 raw-window-handle = "0.6"
 egui_software_backend = { version = "0.0.3", features = ["rayon"] }
+ar-reshaper = "1.5.0"
+unicode-bidi = "0.3.18"
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"
