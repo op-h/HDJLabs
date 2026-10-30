@@ -1,0 +1,33 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Test
+        run: cargo test --locked
+      - name: Build
+        run: cargo build --release --locked
+      - name: Checksum
+        shell: pwsh
+        run: |
+          $h = (Get-FileHash target/release/HDJLabs.exe -Algorithm SHA256).Hash.ToLower()
+          "$h  HDJLabs.exe" | Out-File -Encoding ascii target/release/HDJLabs.exe.sha256
+      - name: Publish
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            target/release/HDJLabs.exe
+            target/release/HDJLabs.exe.sha256
+          generate_release_notes: true

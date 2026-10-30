@@ -1,0 +1,233 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HDJLabs — locked-down exams for Windows</title>
+<meta name="description" content="Build an exam, ship it as one locked-down Windows .exe, and collect results over the classroom network. No internet, no accounts.">
+<link rel="icon" type="image/png" href="img/icon.png">
+<meta property="og:title" content="HDJLabs — locked-down exams for Windows">
+<meta property="og:description" content="One .exe per exam. Private-desktop lockdown, a real code editor, live grading over the LAN.">
+<meta property="og:image" content="img/exam-code.png">
+<style>
+:root{
+  --bg:#0b0e0d;--surface:#111615;--surface2:#181e1c;--border:#242c29;--border2:#38433e;
+  --text:#dce3df;--muted:#86938d;--faint:#545f5a;--accent:#a8e33a;--on-accent:#0b0e0d;--warn:#e5a84b;
+  --mono:"Cascadia Mono","JetBrains Mono",ui-monospace,SFMono-Regular,Consolas,monospace;
+  --sans:"Segoe UI Variable Text","Segoe UI",system-ui,-apple-system,sans-serif;
+  --display:"Segoe UI Variable Display","Segoe UI",system-ui,-apple-system,sans-serif;
+}
+@media (prefers-color-scheme:light){
+  :root{--bg:#f3f4f0;--surface:#fff;--surface2:#eceee8;--border:#d8dcd3;--border2:#bac0b6;--text:#141917;--muted:#58635d;--faint:#969e98;--accent:#3f6f0a;--on-accent:#fff;--warn:#9a5b00}
+}
+*{box-sizing:border-box}
+html{-webkit-text-size-adjust:100%}
+body{margin:0;background:var(--bg);color:var(--text);font:16px/1.6 var(--sans)}
+a{color:inherit}
+.wrap{max-width:1120px;margin:0 auto;padding:0 24px}
+.eyebrow{font:500 11.5px/1 var(--mono);letter-spacing:.12em;text-transform:uppercase;color:var(--muted)}
+.mono{font-family:var(--mono)}
+
+/* nav */
+header{border-bottom:1px solid var(--border)}
+header .wrap{display:flex;align-items:center;justify-content:space-between;height:60px}
+.brand{display:flex;align-items:center;gap:10px;text-decoration:none;font:600 16px var(--display)}
+.brand img{width:28px;height:28px;border-radius:4px}
+nav{display:flex;gap:22px;font-size:14px}
+nav a{text-decoration:none;color:var(--muted)}
+nav a:hover{color:var(--text)}
+
+/* hero */
+.hero{padding:72px 0 56px;background-image:linear-gradient(var(--border) 1px,transparent 1px),linear-gradient(90deg,var(--border) 1px,transparent 1px);background-size:32px 32px;background-position:-1px -1px}
+.hero .wrap{display:grid;grid-template-columns:7fr 5fr;gap:48px;align-items:start}
+.hero .wrap>*,.split>*,.download>*{min-width:0}
+.spec dd,.meta{overflow-wrap:anywhere}
+h1{font:600 clamp(34px,5vw,52px)/1.08 var(--display);letter-spacing:-.02em;margin:14px 0 18px;max-width:14ch}
+.lede{font-size:18px;color:var(--muted);max-width:56ch;margin:0 0 30px}
+.cta{display:flex;flex-wrap:wrap;gap:14px;align-items:center}
+.btn{display:inline-flex;align-items:center;gap:10px;height:44px;padding:0 20px;border-radius:4px;font:600 15px var(--sans);text-decoration:none;border:1px solid var(--border2);background:transparent;transition:background .12s,border-color .12s}
+.btn:hover{border-color:var(--text)}
+.btn.primary{background:var(--accent);border-color:var(--accent);color:var(--on-accent)}
+.btn.primary:hover{filter:brightness(1.06)}
+.btn:focus-visible{outline:2px solid var(--accent);outline-offset:3px}
+.meta{margin-top:14px;font:12.5px var(--mono);color:var(--faint)}
+.spec{background:var(--surface);border:1px solid var(--border);border-radius:6px}
+.spec dl{margin:0;display:grid;grid-template-columns:auto 1fr}
+.spec dt,.spec dd{margin:0;padding:12px 18px;border-top:1px solid var(--border)}
+.spec dt:first-of-type,.spec dd:first-of-type{border-top:0}
+.spec dt{font:500 11.5px/1.9 var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+.spec dd{font:14px/1.6 var(--mono)}
+.spec .head{padding:14px 18px;border-bottom:1px solid var(--border);display:flex;justify-content:space-between}
+.dot{display:inline-block;width:7px;height:7px;border-radius:1px;background:var(--accent);margin-right:8px;vertical-align:1px}
+
+/* shot */
+.shot{margin:0;padding:0 0 64px}
+.shot img{width:100%;display:block;border:1px solid var(--border2);border-radius:6px}
+.shot figcaption{margin-top:10px;font:12.5px var(--mono);color:var(--faint)}
+
+/* sections */
+section{padding:64px 0;border-top:1px solid var(--border)}
+h2{font:600 30px/1.2 var(--display);letter-spacing:-.01em;margin:10px 0 14px;max-width:24ch}
+.split{display:grid;grid-template-columns:4fr 8fr;gap:48px}
+.rows{border-top:1px solid var(--border)}
+.row{display:grid;grid-template-columns:220px 1fr;gap:24px;padding:16px 0;border-bottom:1px solid var(--border)}
+.row b{font-weight:600}
+.row p{margin:0;color:var(--muted)}
+.steps{list-style:none;margin:0;padding:0;counter-reset:s}
+.steps li{counter-increment:s;display:grid;grid-template-columns:44px 1fr;padding:16px 0;border-bottom:1px solid var(--border)}
+.steps li::before{content:counter(s,decimal-leading-zero);font:13px/1.6 var(--mono);color:var(--accent)}
+.steps b{display:block}
+.steps span{color:var(--muted)}
+.gallery{display:grid;grid-template-columns:3fr 2fr;gap:16px}
+.gallery img{width:100%;display:block;border:1px solid var(--border);border-radius:6px}
+.gallery .tall{grid-row:span 2}
+table{width:100%;border-collapse:collapse;font-size:15px}
+th,td{text-align:left;padding:11px 0;border-bottom:1px solid var(--border);vertical-align:top}
+th{font:500 11.5px var(--mono);letter-spacing:.1em;text-transform:uppercase;color:var(--muted)}
+td:first-child{width:34%;font-weight:600;padding-right:16px}
+td{color:var(--muted)}
+code{font:13.5px var(--mono);background:var(--surface2);border:1px solid var(--border);padding:1px 6px;border-radius:2px;color:var(--text)}
+.download{display:grid;grid-template-columns:1fr auto;gap:32px;align-items:center;background:var(--surface);border:1px solid var(--border);border-radius:6px;padding:32px}
+.download h2{margin-top:6px}
+footer{padding:32px 0 48px;color:var(--faint);font:13px var(--mono)}
+footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+
+@media (max-width:880px){
+  .hero .wrap,.split,.gallery,.download{grid-template-columns:1fr}
+  .gallery .tall{grid-row:auto}
+  .row{grid-template-columns:1fr;gap:4px}
+  nav{display:none}
+  .hero{padding-top:48px}
+  .lede{font-size:16.5px}
+  .download{padding:22px}
+  .spec dl{grid-template-columns:96px 1fr}
+  .spec dt,.spec dd{padding:10px 14px}
+}
+</style>
+</head>
+<body>
+<header>
+  <div class="wrap">
+    <a class="brand" href="#"><img src="img/icon.png" alt="">HDJLabs</a>
+    <nav>
+      <a href="#lockdown">Lockdown</a>
+      <a href="#code">Code questions</a>
+      <a href="#classroom">Classroom</a>
+      <a href="https://github.com/op-h/HDJLabs">GitHub</a>
+    </nav>
+  </div>
+</header>
+
+<div class="hero">
+  <div class="wrap">
+    <div>
+      <div class="eyebrow">Exam software for Windows labs</div>
+      <h1>One exam. One locked-down .exe.</h1>
+      <p class="lede">Write the questions in HDJLabs Studio and export a single file. Students run it, enter the password you announce, and the PC stays inside the exam until they submit. Results come back over the classroom network. No internet, no accounts, no server.</p>
+      <div class="cta">
+        <a class="btn primary" href="https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs.exe">Download for Windows</a>
+        <a class="btn" href="https://github.com/op-h/HDJLabs">Source on GitHub</a>
+      </div>
+      <div class="meta">HDJLabs.exe · Windows 10 (2004+) / 11 · 64-bit · portable · MIT</div>
+    </div>
+    <div class="spec" aria-label="At a glance">
+      <div class="head"><span class="eyebrow">At a glance</span><span class="eyebrow"><span class="dot"></span>v1.0</span></div>
+      <dl>
+        <dt>Lockdown</dt><dd>Private desktop, shortcut hook, gesture &amp; capture block</dd>
+        <dt>Questions</dt><dd>Choice, multi-answer, true/false, short, code</dd>
+        <dt>Languages</dt><dd>Python, JS built in · C, C++, Java, Go, Rust</dd>
+        <dt>Network</dt><dd>LAN or hotspot, end-to-end encrypted</dd>
+        <dt>Grading</dt><dd>Instant, test-case based, manual override</dd>
+        <dt>Install</dt><dd>None. One file for teacher and students.</dd>
+      </dl>
+    </div>
+  </div>
+</div>
+
+<div class="wrap">
+  <figure class="shot">
+    <img src="img/exam-code.png" alt="A Python code question in the exam: problem and examples on the left, editor with line numbers and syntax highlighting, test results showing 2 of 2 passed." width="1280" height="820" loading="eager">
+    <figcaption>A Python question inside a locked exam. Run with F5, check the examples with Ctrl+Enter.</figcaption>
+  </figure>
+</div>
+
+<section id="lockdown">
+  <div class="wrap split">
+    <div>
+      <div class="eyebrow">Lockdown</div>
+      <h2>A browser tab can detect a student leaving. This blocks the exits.</h2>
+    </div>
+    <div class="rows">
+      <div class="row"><b>Private desktop</b><p>The exam runs on its own Windows desktop. No taskbar, Start menu, notifications or other windows exist there, so there's nothing to switch to.</p></div>
+      <div class="row"><b>Shortcuts</b><p>Win key, Alt+Tab, Alt+F4, Ctrl+Esc, Ctrl+Shift+Esc and Print Screen are swallowed, and so are keystrokes injected by macro tools.</p></div>
+      <div class="row"><b>Ctrl+Alt+Del</b><p>Task Manager, lock, sign-out and the power menu are removed for the duration, then restored exactly as they were.</p></div>
+      <div class="row"><b>Touchpad &amp; touch</b><p>Three- and four-finger gestures and edge swipes are switched off.</p></div>
+      <div class="row"><b>Screen capture</b><p>Screenshots, recordings and screen shares capture a blank window. The exam refuses to start under Remote Desktop or while TeamViewer, AnyDesk and similar tools run.</p></div>
+      <div class="row"><b>Crash-safe</b><p>Every setting is backed up first. If the power goes out mid-exam, the next launch restores the PC, and the student's answers resume from an encrypted autosave.</p></div>
+    </div>
+  </div>
+</section>
+
+<section id="code">
+  <div class="wrap split">
+    <div>
+      <div class="eyebrow">Code questions</div>
+      <h2>An editor students already know how to use.</h2>
+      <p style="color:var(--muted)">Line numbers, highlighting, Tab indentation on selections, auto-indent, Ctrl+/ comments, a stdin box and per-test results. Student code runs in a Job Object sandbox: one process, capped memory and time, no clipboard.</p>
+    </div>
+    <table>
+      <thead><tr><th>Language</th><th>Runs with</th></tr></thead>
+      <tbody>
+        <tr><td>Python</td><td>Built in. Uses the installed CPython if present.</td></tr>
+        <tr><td>JavaScript</td><td>Built in. Uses Node.js if present.</td></tr>
+        <tr><td>C / C++</td><td>gcc, g++ or clang (MinGW, MSYS2, LLVM)</td></tr>
+        <tr><td>Java</td><td>Any JDK</td></tr>
+        <tr><td>Go · Rust</td><td><code>go</code>, <code>rustc</code></td></tr>
+      </tbody>
+    </table>
+  </div>
+</section>
+
+<section id="classroom">
+  <div class="wrap split">
+    <div>
+      <div class="eyebrow">Classroom</div>
+      <h2>Watch the room, not a spreadsheet.</h2>
+    </div>
+    <ol class="steps">
+      <li><div><b>Export</b><span>Set an exam password and a proctor exit password. Questions stay encrypted until you announce the first one.</span></div></li>
+      <li><div><b>Share</b><span>Start the live session. Students download the exam from your PC's address in any browser on the same Wi-Fi, switch or hotspot.</span></div></li>
+      <li><div><b>Monitor</b><span>See who is connected, how far along they are, time left and blocked-shortcut alerts. Read their code as they write it.</span></div></li>
+      <li><div><b>Grade</b><span>Scores arrive the moment a student submits. Re-run any program, override points, export CSV. Offline PCs save a sealed result file instead.</span></div></li>
+    </ol>
+  </div>
+  <div class="wrap" style="margin-top:40px">
+    <div class="gallery">
+      <img class="tall" src="img/studio-live.png" alt="Live classroom roster with progress, time left, alerts and a student's answers." loading="lazy" width="1360" height="860">
+      <img src="img/exam-welcome.png" alt="Exam sign-in screen with exam details and password field." loading="lazy" width="1280" height="820">
+      <img src="img/studio-results.png" alt="Results with per-question difficulty and manual point overrides." loading="lazy" width="1360" height="860">
+    </div>
+  </div>
+</section>
+
+<section>
+  <div class="wrap">
+    <div class="download">
+      <div>
+        <div class="eyebrow">Get started</div>
+        <h2>Download, open, load the sample exam.</h2>
+        <p style="color:var(--muted);margin:0">SmartScreen may warn on first run because the file isn't code-signed yet. Choose <b>More info → Run anyway</b>. Network setup and firewall notes are in the <a href="https://github.com/op-h/HDJLabs/blob/main/docs/classroom-network.md">classroom guide</a>.</p>
+      </div>
+      <a class="btn primary" href="https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs.exe">Download HDJLabs.exe</a>
+    </div>
+  </div>
+</section>
+
+<footer>
+  <div class="wrap">
+    <span>HDJLabs · MIT · built by <a href="https://github.com/op-h">OPH</a></span>
+    <span><a href="https://github.com/op-h/HDJLabs/blob/main/docs/security-review.md">Security review</a> · <a href="https://github.com/op-h/HDJLabs/releases">Releases</a></span>
+  </div>
+</footer>
+</body>
+</html>

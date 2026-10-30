@@ -1,5 +1,8 @@
-# Real Firebase config holds a live project/DB URL — commit only firebase-config.example.js.
-js/firebase-config.js
+/target
+
+# Teacher projects hold the private key that opens students' results — never commit them.
+*.hdjx
+*.hdjr
 
 # OS / editor cruft
 .DS_Store
