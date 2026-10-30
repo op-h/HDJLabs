@@ -195,7 +195,7 @@ mod tests {
             id: 2,
             prompt: "code".into(),
             points: 5.0,
-            kind: Kind::Code(CodeSpec { lang: Lang::Python, starter: String::new(), tests: vec![], reference: "SECRET_SOLUTION".into() }),
+            kind: Kind::Code(CodeSpec { lang: Lang::Python, starter: String::new(), tests: vec![], reference: "SECRET_SOLUTION".into(), setup: String::new(), simple: false }),
         });
         e
     }

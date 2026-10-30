@@ -130,6 +130,8 @@ fn detect(lang: Lang) -> Option<Tool> {
         Lang::Java => sys(&["javac"]).map(|(p, _)| Tool { engine: Engine::System(p), label: "JDK".into() }),
         Lang::Go => sys(&["go"]).map(|(p, _)| Tool { engine: Engine::System(p), label: "Go".into() }),
         Lang::Rust => sys(&["rustc"]).map(|(p, _)| Tool { engine: Engine::System(p), label: "rustc".into() }),
+        Lang::Sql => Some(Tool { engine: Engine::Builtin, label: "SQLite (built-in)".into() }),
+        Lang::Web => Some(Tool { engine: Engine::Builtin, label: "Live preview".into() }),
     }
 }
 
@@ -157,7 +159,11 @@ fn plan(lang: Lang, tool: &Tool, dir: &Path) -> Vec<Step> {
     let path = match &tool.engine {
         Engine::System(p) => p.clone(),
         Engine::Builtin => {
-            let which = if lang == Lang::Python { "python" } else { "js" };
+            let which = match lang {
+                Lang::Python => "python",
+                Lang::Sql => "sql",
+                _ => "js",
+            };
             return vec![Step { program: me, args: vec!["--exec".into(), which.into(), src], compile: false }];
         }
     };
@@ -172,6 +178,7 @@ fn plan(lang: Lang, tool: &Tool, dir: &Path) -> Vec<Step> {
         Lang::Cpp => vec![Step { program: path, args: s(&[&src, "-O2", "-std=c++17", "-o", &exe]), compile: true }, run_exe],
         Lang::Go => vec![Step { program: path, args: s(&["build", "-o", &exe, &src]), compile: true }, run_exe],
         Lang::Rust => vec![Step { program: path, args: s(&[&src, "-o", &exe]), compile: true }, run_exe],
+        Lang::Sql | Lang::Web => vec![],
         Lang::Java => {
             let java = path.with_file_name("java.exe");
             vec![
@@ -187,6 +194,9 @@ pub fn run(lang: Lang, source: &str, stdin: &str, timeout: Duration) -> RunOutpu
     let Some(tool) = tool(lang) else {
         return RunOutput::failed(&format!("No {} toolchain was found on this computer.", lang.name()), true);
     };
+    if lang.is_preview_only() {
+        return RunOutput::failed("Web pages are shown in the preview, not run.", false);
+    }
     let dir = std::env::temp_dir().join("HDJLabs").join(format!("run-{}", crate::crypto::random_hex(6)));
     // Node lacks the browser-style input helpers the built-in engine provides; add them on the
     // first line (no newline) so error line numbers still match the student's editor.
@@ -434,6 +444,7 @@ mod tests {
             Lang::Java => "import java.util.*;\npublic class Main{public static void main(String[] s){Scanner in=new Scanner(System.in);System.out.println(\"sum \"+(in.nextInt()+in.nextInt()));}}",
             Lang::Go => "package main\nimport \"fmt\"\nfunc main(){var a,b int;fmt.Scan(&a,&b);fmt.Println(\"sum\",a+b)}",
             Lang::Rust => "fn main(){let mut s=String::new();std::io::stdin().read_line(&mut s).unwrap();let v:i32=s.split_whitespace().map(|x|x.parse::<i32>().unwrap()).sum();println!(\"sum {}\",v);}",
+            Lang::Sql | Lang::Web => "",
         }
     }
 
@@ -441,7 +452,7 @@ mod tests {
     fn system_toolchains_compile_and_run() {
         for lang in Lang::ALL {
             match tool(lang) {
-                Some(Tool { engine: Engine::System(_), label }) => {
+                Some(Tool { engine: Engine::System(_), label }) if !hello(lang).is_empty() => {
                     let o = run(lang, hello(lang), "2 3", Duration::from_secs(60));
                     assert!(o.ok(), "{lang:?} via {label} failed: {o:?}");
                     assert_eq!(o.stdout.trim(), "sum 5", "{lang:?}");

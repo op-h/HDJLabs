@@ -131,6 +131,41 @@ pub fn recover_stale() {
     }
 }
 
+fn removal_marker() -> PathBuf {
+    data_dir().join("remove-exam.txt")
+}
+
+/// Ask for the exam file to be deleted once it has closed. In lockdown the launcher (on the
+/// normal desktop) performs it; otherwise we schedule it ourselves.
+pub fn request_removal(exe: &std::path::Path) {
+    let _ = std::fs::write(removal_marker(), exe.to_string_lossy().as_bytes());
+}
+
+/// Called by whichever process outlives the exam UI: deletes the exam file if it was requested.
+pub fn perform_requested_removal() {
+    let Ok(target) = std::fs::read_to_string(removal_marker()) else { return };
+    let _ = std::fs::remove_file(removal_marker());
+    let me = std::env::current_exe().unwrap_or_default();
+    if std::path::Path::new(target.trim()) == me {
+        schedule_self_delete(&me);
+    }
+}
+
+/// A running .exe can't delete itself: start a hidden helper that retries for ~30 s after we exit.
+pub fn schedule_self_delete(exe: &std::path::Path) {
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        let p = exe.to_string_lossy().replace('"', "");
+        let script = format!("for /l %i in (1,1,30) do @(del /f /q \"{p}\" >nul 2>&1 & if not exist \"{p}\" exit /b & ping -n 2 127.0.0.1 >nul)");
+        // raw_arg: cmd.exe parses its own command line and doesn't understand Rust's \" escaping.
+        let _ = std::process::Command::new("cmd")
+            .raw_arg(format!("/d /c \"{script}\""))
+            .creation_flags(0x0800_0000) // CREATE_NO_WINDOW
+            .spawn();
+    }
+}
+
 pub use win::*;
 
 #[cfg(windows)]
@@ -421,5 +456,24 @@ mod win {
         unsafe {
             let _ = ClipCursor(None);
         }
+    }
+}
+
+#[cfg(all(test, windows))]
+mod removal_tests {
+    #[test]
+    fn scheduled_delete_removes_file_with_spaces_in_path() {
+        let dir = std::env::temp_dir().join(format!("hdj del {}", crate::crypto::random_hex(4)));
+        std::fs::create_dir_all(&dir).unwrap();
+        let f = dir.join("My Exam (1).exe");
+        std::fs::write(&f, b"x").unwrap();
+        super::schedule_self_delete(&f);
+        let start = std::time::Instant::now();
+        while f.exists() && start.elapsed() < std::time::Duration::from_secs(15) {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        let gone = !f.exists();
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(gone, "file should be deleted by the helper");
     }
 }

@@ -8,26 +8,59 @@ on:
 permissions:
   contents: write
 
+env:
+  # Pinned nightly: the Windows 7 target needs -Zbuild-std. Bump deliberately, after testing.
+  NIGHTLY: nightly-2026-10-30
+
 jobs:
   build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
+
       - uses: dtolnay/rust-toolchain@stable
+
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.NIGHTLY }}
+          components: rust-src
+
       - uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: |
+            . -> target
+            . -> target-win7
+
       - name: Test
-        run: cargo test --locked
-      - name: Build
-        run: cargo build --release --locked
-      - name: Checksum
+        run: cargo +stable test --locked
+
+      - name: Build universal binary (Windows 7 SP1 – 11)
+        env:
+          CARGO_TARGET_DIR: target-win7
+        run: cargo +${{ env.NIGHTLY }} build --release --locked -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc
+
+      - name: Build installer
         shell: pwsh
         run: |
-          $h = (Get-FileHash target/release/HDJLabs.exe -Algorithm SHA256).Hash.ToLower()
-          "$h  HDJLabs.exe" | Out-File -Encoding ascii target/release/HDJLabs.exe.sha256
+          choco install innosetup --no-progress -y
+          $version = "${{ github.ref_name }}".TrimStart('v')
+          if ($version -notmatch '^\d') { $version = (Select-String -Path Cargo.toml -Pattern '^version = "(.+)"').Matches[0].Groups[1].Value }
+          & "C:\Program Files (x86)\Inno Setup 6\ISCC.exe" /Q "/DAppVersion=$version" installer\HDJLabs.iss
+          Copy-Item target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe dist\HDJLabs.exe
+
+      - name: Checksums
+        shell: pwsh
+        run: |
+          Get-ChildItem dist\*.exe | ForEach-Object {
+            "$((Get-FileHash $_ -Algorithm SHA256).Hash.ToLower())  $($_.Name)"
+          } | Out-File -Encoding ascii dist\SHA256SUMS.txt
+          Get-Content dist\SHA256SUMS.txt
+
       - name: Publish
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            target/release/HDJLabs.exe
-            target/release/HDJLabs.exe.sha256
+            dist/HDJLabs-Setup.exe
+            dist/HDJLabs.exe
+            dist/SHA256SUMS.txt
           generate_release_notes: true

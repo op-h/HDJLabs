@@ -1,8 +1,8 @@
 # HDJLabs security review
 
-Scope: HDJLabs 1.0.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
-runner. Review date: 2026-10-30. Tested on Windows 11 (build 26300) with the debug and release
-builds.
+Scope: HDJLabs 1.1.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
+runner. Review date: 2026-10-30. Tested on Windows 11 (build 26300), and across a VMware LAN with student
+PCs on Windows 7 SP1 and Windows 8.1 (no GPU driver), using the debug and release builds.
 
 ## Threat model
 
@@ -65,6 +65,13 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | 21 | Kill or crash the exam, relaunch, continue | Code path | Attempt resumes (time keeps running); "Exam was closed and resumed" is logged to the teacher |
 | 22 | Brute-force the exam password in the UI | Code path | Exponential cooldown after 3 failures (up to 60 s); each failure reported to the teacher |
 | 23 | Debug self-test hooks (auto-close, screenshots) usable in production | Build config | Compiled out of release builds (`cfg(debug_assertions)`) |
+| 24 | Two student PCs (Windows 7, Windows 8.1) on a separate network, both in full lockdown | Live test over VMware NAT | Both found the teacher by broadcast, downloaded the exam (progress tracked), signed in, ran code, submitted; scores 3/20 and 1/20 arrived instantly |
+| 25 | Student code on Windows 7 with no Node/Python installed | Live test | Built-in JavaScript ran inside the Job Object; tests passed 1/1 (hidden test passed at submission) |
+| 26 | System state after lockdown on Windows 7 / 8.1 | Checked inside each VM | Policy keys back to their original (absent) state, no leftover backup file, sealed result backup present |
+| 27 | Teacher removes the exam file from student PCs | Live test + unit test | Found a bug (see below); the fixed version is covered by a test deleting a file whose path has spaces and brackets |
+| 28 | HTML preview used as an escape route (links, `window.open`, downloads, print, devtools, context menu, browser shortcuts) | Code review | Navigation limited to the page itself; new windows and downloads denied; print and context menu blocked; devtools and browser accelerator keys off |
+| 29 | Exam exe run on a PC without a GPU driver | Live test (Windows 8.1, Basic Display Adapter) | OpenGL unavailable → relaunches with the CPU renderer automatically, inside lockdown |
+| 30 | Missing runtime DLLs on old PCs | `dumpbin /dependents` | No VC++ runtime needed (static CRT); Windows-8-only DLLs are delay-loaded so the binary loads on Windows 7 |
 
 ## Findings fixed during the review
 
@@ -76,6 +83,10 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | Medium | Sticky Keys and similar accessibility hotkeys open system dialogs (a classic kiosk escape). | Hotkeys disabled for the duration and restored afterwards. |
 | Low | Live answer snapshots failed to decode (integer map keys inside a tagged enum), forcing a reconnect. | Sent as a list of pairs; regression test added. |
 | Low | Port probes (connect, then close) were logged as errors. | Treated as a normal disconnect. |
+| High | Exams didn't start at all on Windows 7 (missing `GetSystemTimePreciseAsFileTime`) or on PCs without a GPU driver. | Universal Windows 7 target build; CPU renderer fallback. |
+| Medium | Before sign-in, student PCs reconnected to the teacher every 2 s and showed "Offline". | Clients wait at "Teacher found" until sign-in; clear connection stages. |
+| Medium | "Remove exam" did not delete the file: the command line reached `cmd.exe` with Rust-style `\"` escaping, and the CPU renderer skipped the exit callback. | Raw command line; cleanup runs explicitly before closing. Regression test added. |
+| Low | The HTML preview rendered pages dark (WebView2 auto-dark) unlike a real browser. | Light theme and a zero-specificity white default. |
 
 ## Known limitations
 

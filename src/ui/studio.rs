@@ -49,6 +49,12 @@ pub struct Studio {
     review_results: HashMap<(String, u32), Vec<TestOutcome>>,
     last_autosave: Instant,
     font: f32,
+    firewall_ok: Option<bool>,
+    live_started: Option<Instant>,
+    confirm_remove_all: bool,
+    /// Debug guide recordings: fixed scroll position and caption.
+    guide_scroll: Option<f32>,
+    guide_caption: Option<String>,
 }
 
 impl Studio {
@@ -71,6 +77,11 @@ impl Studio {
             review_results: HashMap::new(),
             last_autosave: Instant::now(),
             font: 14.0,
+            firewall_ok: None,
+            live_started: None,
+            confirm_remove_all: false,
+            guide_scroll: None,
+            guide_caption: None,
         }
     }
 
@@ -247,8 +258,9 @@ impl Studio {
     }
 }
 
-impl eframe::App for Studio {
-    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+impl crate::ui::Root for Studio {
+    fn root(&mut self, ui: &mut egui::Ui) {
+        let ctx = &ui.ctx().clone();
         #[cfg(debug_assertions)]
         if crate::ui::shot::enabled() {
             self.shot_script(ctx);
@@ -259,8 +271,8 @@ impl eframe::App for Studio {
             self.save(false);
         }
         let p = pal();
-        egui::SidePanel::left("nav").exact_width(232.0).resizable(false).frame(egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(Margin::symmetric(16, 18))).show(ctx, |ui| self.nav(ui));
-        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(28, 22))).show(ctx, |ui| match self.page {
+        egui::Panel::left("nav").exact_size(232.0).resizable(false).frame(egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).inner_margin(Margin::symmetric(16, 18))).show_inside(ui, |ui| self.nav(ui));
+        egui::CentralPanel::default().frame(egui::Frame::new().fill(p.bg).inner_margin(Margin::symmetric(28, 22))).show_inside(ui, |ui| match self.page {
             Page::Home => self.home(ui),
             Page::Build => self.build(ui),
             Page::Settings => self.settings(ui),
@@ -268,9 +280,17 @@ impl eframe::App for Studio {
             Page::Results => self.results(ui),
         });
         self.draw_toasts(ctx);
+        if let Some(c) = &self.guide_caption {
+            let p = pal();
+            egui::Area::new(egui::Id::new("guide-caption")).anchor(egui::Align2::CENTER_BOTTOM, egui::vec2(0.0, -24.0)).order(egui::Order::Foreground).show(ctx, |ui| {
+                egui::Frame::new().fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(18, 10)).show(ui, |ui| {
+                    ui.add(egui::Label::new(RichText::new(c).font(theme::semibold(17.0)).color(p.on_accent)).extend());
+                });
+            });
+        }
     }
 
-    fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+    fn exit(&mut self) {
         if self.dirty && self.path.is_some() {
             let _ = self.project.save(self.path.as_ref().unwrap());
         }
@@ -451,23 +471,32 @@ impl Studio {
         ui.horizontal_top(|ui| {
             // Question list.
             ui.allocate_ui_with_layout(egui::vec2(list_w, ui.available_height()), Layout::top_down(Align::Min), |ui| {
-                ui.horizontal_wrapped(|ui| {
-                    ui.spacing_mut().item_spacing = egui::vec2(6.0, 6.0);
-                    ui.spacing_mut().button_padding = egui::vec2(9.0, 5.0);
+                ui.horizontal(|ui| {
                     let id = self.project.exam.next_question_id();
                     let mut add = None;
-                    if ui.button(format!("{} Choice", icon::ADD)).clicked() {
-                        add = Some(Kind::Choice { options: vec![String::new(), String::new(), String::new(), String::new()], correct: vec![0], multiple: false });
-                    }
-                    if ui.button(format!("{} True/False", icon::ADD)).clicked() {
-                        add = Some(Kind::TrueFalse { answer: true });
-                    }
-                    if ui.button(format!("{} Short", icon::ADD)).clicked() {
-                        add = Some(Kind::Short { accepted: vec![String::new()], case_sensitive: false });
-                    }
-                    if ui.button(format!("{} Code", icon::ADD)).clicked() {
-                        add = Some(Kind::Code(CodeSpec { lang: Lang::Python, starter: Lang::Python.template().into(), tests: vec![TestCase { input: "World".into(), expected: "Hello, World".into(), hidden: false }], reference: String::new() }));
-                    }
+                    let p = pal();
+                    let menu_btn = egui::Button::new(RichText::new(format!("{}  Add question", icon::ADD)).font(theme::semibold(14.0)).color(p.on_accent)).fill(p.accent).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(list_w, 36.0));
+                    egui::containers::menu::MenuButton::from_button(menu_btn).ui(ui, |ui| {
+                        ui.set_min_width(list_w - 8.0);
+                        for (label, hint, kind) in [
+                            ("Multiple choice", "One or several correct options", 0),
+                            ("True / False", "A statement to judge", 1),
+                            ("Short answer", "A word, number or flag — TryHackMe style", 2),
+                            ("Code", "Python, JavaScript, SQL, HTML/CSS/JS, C, C++, Java, Go, Rust", 3),
+                        ] {
+                            let r = ui.add(egui::Button::new(RichText::new(label).font(theme::semibold(14.0))).frame(false).min_size(egui::vec2(ui.available_width(), 24.0))).on_hover_text(hint);
+                            ui.label(theme::muted(hint).size(12.0));
+                            ui.add_space(4.0);
+                            if r.clicked() {
+                                add = Some(match kind {
+                                    0 => Kind::Choice { options: vec![String::new(), String::new(), String::new(), String::new()], correct: vec![0], multiple: false },
+                                    1 => Kind::TrueFalse { answer: true },
+                                    2 => Kind::Short { accepted: vec![String::new()], case_sensitive: false, show_format: true },
+                                    _ => Kind::Code(CodeSpec::new(Lang::Python)),
+                                });
+                            }
+                        }
+                    });
                     if let Some(k) = add {
                         let mut q = Question::new(id, k);
                         if matches!(q.kind, Kind::Code(_)) {
@@ -560,7 +589,11 @@ impl Studio {
             ui.add_space(8.0);
             // Editor.
             ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ui.available_height()), Layout::top_down(Align::Min), |ui| {
-                egui::ScrollArea::vertical().id_salt("qedit").auto_shrink([false, false]).show(ui, |ui| match self.selected.filter(|i| *i < n) {
+                let mut scroll = egui::ScrollArea::vertical().id_salt("qedit").auto_shrink([false, false]);
+                if let Some(off) = self.guide_scroll {
+                    scroll = scroll.vertical_scroll_offset(off);
+                }
+                scroll.show(ui, |ui| match self.selected.filter(|i| *i < n) {
                     None => {
                         theme::card(ui, |ui| {
                             ui.set_width(ui.available_width());
@@ -579,6 +612,8 @@ impl Studio {
         let mut q = self.project.exam.questions[i].clone();
         let before = q.clone();
         let mut ref_run = false;
+        // Guide recordings show the solution section open.
+        let force_solution_open = self.guide_scroll.is_some() && matches!(&q.kind, Kind::Code(c) if !c.reference.is_empty());
         theme::card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal(|ui| {
@@ -591,18 +626,14 @@ impl Studio {
             });
             ui.add_space(4.0);
             theme::field_label(ui, "Prompt");
-            ui.add(egui::TextEdit::multiline(&mut q.prompt).hint_text("Write the question…").desired_rows(4).desired_width(f32::INFINITY).margin(Margin::same(12)));
+            ui.add(egui::TextEdit::multiline(&mut q.prompt).hint_text("Write the question…").desired_rows(4).desired_width(theme::fill(&ui, 12)).margin(Margin::same(12)));
             ui.add_space(8.0);
             match &mut q.kind {
                 Kind::Choice { options, correct, multiple } => {
-                    ui.horizontal(|ui| {
-                        theme::field_label(ui, "Options — tick the correct answer(s)");
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            if ui.checkbox(multiple, "Allow several correct answers").changed() && !*multiple && correct.len() > 1 {
-                                correct.truncate(1);
-                            }
-                        });
-                    });
+                    theme::field_label(ui, "Options — tick the correct answer(s)");
+                    if ui.checkbox(multiple, "Allow several correct answers").changed() && !*multiple && correct.len() > 1 {
+                        correct.truncate(1);
+                    }
                     let mut remove = None;
                     let field_w = ui.available_width() - 96.0;
                     for (oi, opt) in options.iter_mut().enumerate() {
@@ -642,7 +673,7 @@ impl Studio {
                         ui.radio_value(answer, false, "False");
                     });
                 }
-                Kind::Short { accepted, case_sensitive } => {
+                Kind::Short { accepted, case_sensitive, show_format } => {
                     theme::field_label(ui, "Accepted answers (extra spaces are ignored)");
                     let mut remove = None;
                     let field_w = ui.available_width() - 48.0;
@@ -662,82 +693,170 @@ impl Studio {
                             accepted.push(String::new());
                         }
                         ui.checkbox(case_sensitive, "Case sensitive");
+                        ui.checkbox(show_format, "Show answer format").on_hover_text("TryHackMe style: each letter or digit shows as *, symbols like _ { } ! @ # appear as they are");
                     });
+                    if *show_format {
+                        let first = accepted.iter().find(|a| !a.trim().is_empty()).cloned().unwrap_or_default();
+                        egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(12, 8)).show(ui, |ui| {
+                            ui.set_width(ui.available_width());
+                            ui.label(theme::eyebrow("Students see"));
+                            ui.label(theme::figure(if first.is_empty() { "(type an accepted answer)".to_string() } else { answer_format(&first) }, 15.0, p.text));
+                        });
+                    }
                 }
                 Kind::Code(spec) => {
+                    // 1 · Language
+                    ui.label(theme::eyebrow("1 · Language"));
                     ui.horizontal(|ui| {
-                        theme::field_label(ui, "Language");
                         let old = spec.lang;
-                        egui::ComboBox::from_id_salt(("lang", q.id)).selected_text(spec.lang.name()).show_ui(ui, |ui| {
+                        egui::ComboBox::from_id_salt(("lang", q.id)).width(200.0).selected_text(spec.lang.name()).show_ui(ui, |ui| {
                             for l in Lang::ALL {
-                                let avail = runner::tool(l).map(|t| t.label).unwrap_or_else(|| "not on this PC".into());
-                                ui.selectable_value(&mut spec.lang, l, format!("{}  —  {avail}", l.name()));
+                                ui.selectable_value(&mut spec.lang, l, l.name());
                             }
                         });
-                        if spec.lang != old && (spec.starter.trim().is_empty() || spec.starter == old.template()) {
-                            spec.starter = spec.lang.template().into();
+                        if spec.lang != old {
+                            if spec.starter.trim().is_empty() || spec.starter == old.template() {
+                                spec.starter = spec.lang.template().into();
+                            }
+                            if spec.lang == Lang::Sql && spec.setup.trim().is_empty() {
+                                spec.setup = Lang::sql_setup_template().into();
+                            }
+                            if spec.lang.is_preview_only() {
+                                spec.tests.clear();
+                            }
                         }
                         match runner::tool(spec.lang) {
-                            Some(t) => theme::pill(ui, &format!("{}  {}", icon::CHECK, t.label), p.success),
-                            None => theme::pill(ui, &format!("{}  Students' PCs need this compiler installed", icon::WARNING), p.warning),
+                            Some(t) => theme::pill(ui, &t.label, p.success),
+                            None => theme::pill(ui, "Students' PCs need this compiler", p.warning),
                         };
                     });
-                    if matches!(spec.lang, Lang::Python | Lang::JavaScript) {
-                        ui.label(theme::muted("Runs everywhere — a built-in interpreter ships inside the exam .exe.").size(12.5));
-                    }
-                    theme::field_label(ui, "Starter code (what students see first)");
-                    ui.allocate_ui(egui::vec2(ui.available_width(), 220.0), |ui| {
-                        ui.set_min_height(200.0);
+                    ui.add(egui::Label::new(theme::muted(lang_tip(spec.lang)).size(13.0)).wrap());
+                    crate::ui::guides::show(ui, spec.lang);
+                    ui.add_space(10.0);
+
+                    // 2 · What students start with
+                    ui.label(theme::eyebrow("2 · What students start with"));
+                    ui.allocate_ui(egui::vec2(ui.available_width(), 170.0), |ui| {
+                        ui.set_min_height(160.0);
                         editor::code_editor(ui, ("starter", q.id), &mut spec.starter, spec.lang, self.font, false);
                     });
-                    ui.add_space(6.0);
-                    theme::field_label(ui, "Reference solution (private — never shipped; used to fill expected outputs)");
-                    ui.allocate_ui(egui::vec2(ui.available_width(), 200.0), |ui| {
-                        ui.set_min_height(180.0);
-                        editor::code_editor(ui, ("ref", q.id), &mut spec.reference, spec.lang, self.font, false);
-                    });
-                    ui.add_space(6.0);
-                    ui.horizontal(|ui| {
-                        ui.label(theme::eyebrow("Test cases"));
-                        ui.label(theme::muted("stdin → expected stdout · score = passed / total × points").size(12.5));
-                        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                            let busy = self.ref_job.is_some();
-                            if ui.add_enabled(!busy && !spec.reference.trim().is_empty() && !spec.tests.is_empty(), egui::Button::new(format!("{}  Fill outputs from solution", icon::PLAY))).clicked() {
-                                ref_run = true;
-                            }
-                            if busy {
-                                ui.add(egui::Spinner::new());
-                            }
+                    if spec.lang == Lang::Sql {
+                        ui.add_space(6.0);
+                        ui.label(theme::eyebrow("Database (runs before every query — students can read it)"));
+                        ui.allocate_ui(egui::vec2(ui.available_width(), 150.0), |ui| {
+                            ui.set_min_height(140.0);
+                            editor::code_editor(ui, ("setup", q.id), &mut spec.setup, Lang::Sql, self.font, false);
                         });
-                    });
-                    let mut remove = None;
-                    for (ti, t) in spec.tests.iter_mut().enumerate() {
-                        egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_PANEL)).inner_margin(Margin::same(10)).show(ui, |ui| {
-                            ui.horizontal(|ui| {
-                                ui.label(RichText::new(format!("Test {}", ti + 1)).strong());
-                                ui.checkbox(&mut t.hidden, "Hidden").on_hover_text("Hidden tests only run when the student submits");
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                                    if theme::icon_button(ui, icon::DELETE, "Remove test").clicked() {
-                                        remove = Some(ti);
+                    }
+                    ui.add_space(10.0);
+
+                    // 3 · How it's checked
+                    ui.label(theme::eyebrow("3 · How it's checked"));
+                    if spec.lang.is_preview_only() {
+                        ui.add(egui::Label::new(theme::muted("Students see their page live while they work. You grade it in Results, where you can open each student's page.").size(13.0)).wrap());
+                    } else {
+                        #[derive(PartialEq, Clone, Copy)]
+                        enum Mode {
+                            Output,
+                            Tests,
+                            Manual,
+                        }
+                        let mode = if spec.tests.is_empty() { Mode::Manual } else if spec.simple { Mode::Output } else { Mode::Tests };
+                        let mut new_mode = mode;
+                        ui.horizontal_wrapped(|ui| {
+                            ui.radio_value(&mut new_mode, Mode::Output, "Compare the printed output");
+                            ui.radio_value(&mut new_mode, Mode::Tests, "Several test cases");
+                            ui.radio_value(&mut new_mode, Mode::Manual, "I'll grade it myself");
+                        });
+                        if new_mode != mode {
+                            match new_mode {
+                                Mode::Manual => spec.tests.clear(),
+                                Mode::Output => {
+                                    spec.simple = true;
+                                    if spec.tests.is_empty() {
+                                        spec.tests.push(TestCase { input: String::new(), expected: String::new(), hidden: false });
                                     }
+                                    spec.tests.truncate(1);
+                                    spec.tests[0].hidden = false;
+                                }
+                                Mode::Tests => {
+                                    spec.simple = false;
+                                    if spec.tests.is_empty() {
+                                        spec.tests.push(TestCase { input: String::new(), expected: String::new(), hidden: false });
+                                    }
+                                }
+                            }
+                        }
+                        match new_mode {
+                            Mode::Manual => {
+                                ui.label(theme::muted("No automatic score. Every answer shows up in Results for you to read, run and mark.").size(13.0));
+                            }
+                            Mode::Output => {
+                                let t = &mut spec.tests[0];
+                                ui.label(theme::muted("Full marks when the program prints exactly this (spacing at line ends is ignored).").size(13.0));
+                                ui.add(egui::TextEdit::multiline(&mut t.expected).hint_text("e.g. 55").font(theme::mono(13.5)).desired_rows(3).desired_width(theme::fill(&ui, 4)));
+                                if spec.lang != Lang::Sql {
+                                    ui.horizontal(|ui| {
+                                        ui.label(theme::muted("Input typed into the program (optional)").size(12.5));
+                                        ui.add(egui::TextEdit::singleline(&mut t.input).hint_text("e.g. 10").font(theme::mono(13.0)).desired_width(ui.available_width()));
+                                    });
+                                }
+                            }
+                            Mode::Tests => {
+                                ui.label(theme::muted("Each test gives the program an input and checks what it prints. Score = tests passed ÷ tests × points. Hidden tests run only at submission, so answers can't be hard-coded.").size(13.0));
+                                let mut remove = None;
+                                for (ti, t) in spec.tests.iter_mut().enumerate() {
+                                    egui::Frame::new().fill(p.surface2).corner_radius(CornerRadius::same(theme::R_PANEL)).inner_margin(Margin::same(10)).show(ui, |ui| {
+                                        ui.horizontal(|ui| {
+                                            ui.label(theme::figure(format!("TEST {}", ti + 1), 12.0, p.text));
+                                            ui.checkbox(&mut t.hidden, "Hidden");
+                                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                                if theme::icon_button(ui, icon::DELETE, "Remove test").clicked() {
+                                                    remove = Some(ti);
+                                                }
+                                            });
+                                        });
+                                        ui.columns(2, |cols| {
+                                            cols[0].label(theme::eyebrow(if spec.lang == Lang::Sql { "Extra SQL for this test" } else { "Input" }));
+                                            cols[0].add(egui::TextEdit::multiline(&mut t.input).font(theme::mono(13.0)).desired_rows(2).desired_width(theme::fill(&cols[0], 4)));
+                                            cols[1].label(theme::eyebrow("Expected output"));
+                                            cols[1].add(egui::TextEdit::multiline(&mut t.expected).font(theme::mono(13.0)).desired_rows(2).desired_width(theme::fill(&cols[1], 4)));
+                                        });
+                                    });
+                                }
+                                if let Some(r) = remove {
+                                    spec.tests.remove(r);
+                                }
+                                if ui.button(format!("{}  Add test", icon::ADD)).clicked() {
+                                    spec.tests.push(TestCase { input: String::new(), expected: String::new(), hidden: false });
+                                }
+                            }
+                        }
+
+                        // Optional: the teacher's own solution fills the expected outputs.
+                        if new_mode != Mode::Manual {
+                            ui.add_space(6.0);
+                            egui::CollapsingHeader::new(RichText::new("Your solution (optional) — fill the expected output automatically").font(theme::semibold(13.5)))
+                                .id_salt(("solution", q.id))
+                                .default_open(!spec.reference.trim().is_empty())
+                                .open(force_solution_open.then_some(true))
+                                .show(ui, |ui| {
+                                    ui.label(theme::muted("Never shipped to students. Write it, press the button, and HDJLabs runs it to fill in what students must print.").size(12.5));
+                                    ui.allocate_ui(egui::vec2(ui.available_width(), 160.0), |ui| {
+                                        ui.set_min_height(150.0);
+                                        editor::code_editor(ui, ("ref", q.id), &mut spec.reference, spec.lang, self.font, false);
+                                    });
+                                    ui.horizontal(|ui| {
+                                        let busy = self.ref_job.is_some();
+                                        if ui.add_enabled(!busy && !spec.reference.trim().is_empty() && runner::tool(spec.lang).is_some(), egui::Button::new(format!("{}  Run my solution and fill expected output", icon::PLAY))).clicked() {
+                                            ref_run = true;
+                                        }
+                                        if busy {
+                                            ui.add(egui::Spinner::new());
+                                        }
+                                    });
                                 });
-                            });
-                            ui.columns(2, |cols| {
-                                cols[0].label(theme::muted("Input").size(12.0));
-                                cols[0].add(egui::TextEdit::multiline(&mut t.input).font(egui::FontId::monospace(13.0)).desired_rows(2).desired_width(f32::INFINITY));
-                                cols[1].label(theme::muted("Expected output").size(12.0));
-                                cols[1].add(egui::TextEdit::multiline(&mut t.expected).font(egui::FontId::monospace(13.0)).desired_rows(2).desired_width(f32::INFINITY));
-                            });
-                        });
-                    }
-                    if let Some(r) = remove {
-                        spec.tests.remove(r);
-                    }
-                    if ui.button(format!("{}  Add test", icon::ADD)).clicked() {
-                        spec.tests.push(TestCase { input: String::new(), expected: String::new(), hidden: false });
-                    }
-                    if spec.tests.is_empty() {
-                        ui.label(theme::muted("No tests: this question will be graded by you in Results.").size(12.5));
+                        }
                     }
                 }
             }
@@ -747,7 +866,7 @@ impl Studio {
                 let (tx, rx) = mpsc::channel();
                 let spec = spec.clone();
                 std::thread::spawn(move || {
-                    let outs = spec.tests.iter().map(|t| runner::run(spec.lang, &spec.reference, &t.input, runner::RUN_TIMEOUT)).collect();
+                    let outs = spec.tests.iter().map(|t| runner::run(spec.lang, &spec.reference, &spec.stdin_for(&t.input), runner::RUN_TIMEOUT)).collect();
                     let _ = tx.send(outs);
                 });
                 self.ref_job = Some((q.id, rx));
@@ -796,7 +915,7 @@ impl Studio {
                     theme::field_label(ui, "Teacher / course");
                     theme::text_field(ui, &mut e.author, "e.g. Mr. Hussein — CS101", f32::INFINITY);
                     theme::field_label(ui, "Instructions shown before the exam");
-                    ui.add(egui::TextEdit::multiline(&mut e.instructions).desired_rows(3).desired_width(f32::INFINITY).margin(Margin::same(10)));
+                    ui.add(egui::TextEdit::multiline(&mut e.instructions).desired_rows(3).desired_width(theme::fill(&ui, 10)).margin(Margin::same(10)));
                     theme::field_label(ui, "Duration");
                     ui.add(egui::DragValue::new(&mut e.duration_min).range(1..=600).suffix(" minutes"));
                 });
@@ -819,10 +938,10 @@ impl Studio {
                     ui.set_width(ui.available_width());
                     ui.label(theme::heading("Access", 18.0));
                     theme::field_label(ui, "Exam password — tell students when the exam starts");
-                    ui.add(egui::TextEdit::singleline(&mut e.settings.exam_password).hint_text("Leave empty for no password").desired_width(f32::INFINITY).margin(Margin::symmetric(12, 9)));
+                    ui.add(egui::TextEdit::singleline(&mut e.settings.exam_password).hint_text("Leave empty for no password").desired_width(theme::fill(&ui, 12)).margin(Margin::symmetric(12, 9)));
                     ui.label(theme::muted("The questions are encrypted with this password, so nobody can read them before you announce it.").size(12.5));
                     theme::field_label(ui, "Proctor exit password — only for you");
-                    ui.add(egui::TextEdit::singleline(&mut e.settings.exit_password).hint_text("Unlocks a student's PC without submitting").desired_width(f32::INFINITY).margin(Margin::symmetric(12, 9)));
+                    ui.add(egui::TextEdit::singleline(&mut e.settings.exit_password).hint_text("Unlocks a student's PC without submitting").desired_width(theme::fill(&ui, 12)).margin(Margin::symmetric(12, 9)));
                     ui.label(theme::muted("On the student PC: Ctrl+Shift+F12 or the lock icon opens the proctor dialog.").size(12.5));
                 });
                 cols[1].add_space(12.0);
@@ -833,6 +952,7 @@ impl Studio {
                     ui.label(theme::muted("Private exam desktop · blocks Alt+Tab, Win key, Task Manager, Ctrl+Alt+Del menu, touchpad & edge gestures, screenshots and screen sharing until submission.").size(12.5));
                     ui.add_enabled(e.settings.lockdown, egui::Checkbox::new(&mut e.settings.block_remote_tools, "Refuse to start while remote-control / screen-sharing apps run"));
                     ui.add_enabled(e.settings.lockdown, egui::Checkbox::new(&mut e.settings.block_vm, "Refuse to run inside a virtual machine"));
+                    ui.checkbox(&mut e.settings.remove_after_submit, "Delete the exam file from each student's PC after they submit");
                     ui.add_space(4.0);
                     ui.horizontal(|ui| {
                         ui.label("LAN port");
@@ -850,10 +970,16 @@ impl Studio {
 
     fn live_page(&mut self, ui: &mut egui::Ui) {
         let p = pal();
+        let export = self.project.last_export.clone().filter(|p| p.exists());
+        if self.firewall_ok.is_none() {
+            self.firewall_ok = Some(crate::ui::firewall_allows_self());
+        }
+        let mut start = false;
         ui.horizontal(|ui| {
             ui.vertical(|ui| {
-                ui.label(theme::heading("Live classroom", 26.0));
-                ui.label(theme::muted("Students on the same Wi-Fi / switch connect automatically — no internet needed."));
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.label(theme::heading("Live classroom", 24.0));
+                ui.label(theme::muted("Students on the same Wi-Fi, switch or hotspot join automatically. No internet needed."));
             });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if self.live.is_some() {
@@ -861,68 +987,135 @@ impl Studio {
                         self.live = None;
                     }
                 } else if theme::primary(ui, &format!("{}  Start session", icon::PLAY)).clicked() {
-                    let share = self.project.last_export.clone().filter(|p| p.exists()).map(|p| (p, self.project.exam.title.clone()));
-                    let ctx = ui.ctx().clone();
-                    let server = LiveServer::start(self.project.exam.id.clone(), self.project.teacher_secret.clone(), self.project.exam.author.clone(), self.project.exam.settings.lan_port, share, move || ctx.request_repaint());
-                    for e in &server.errors {
-                        self.toasts.push(Toast { text: e.clone(), at: Instant::now(), error: true });
-                    }
-                    self.live = Some(server);
-                }
-                if theme::ghost(ui, &format!("{}  Allow through firewall", icon::SHIELD)).on_hover_text("Adds a Windows Firewall rule for HDJLabs (asks for administrator permission)").clicked() {
-                    crate::ui::allow_firewall();
+                    start = true;
                 }
             });
         });
         ui.add_space(12.0);
+        if start {
+            if self.firewall_ok != Some(true) {
+                // One-time Windows prompt so students' PCs can reach this one.
+                crate::ui::allow_firewall();
+                self.toast("Windows will ask once for permission so students' PCs can reach this one.", false);
+                self.firewall_ok = None; // re-check next frame
+            }
+            let share = export.clone().map(|p| (p, self.project.exam.title.clone()));
+            let ctx = ui.ctx().clone();
+            let server = LiveServer::start(self.project.exam.id.clone(), self.project.teacher_secret.clone(), self.project.exam.author.clone(), self.project.exam.settings.lan_port, share, move || ctx.request_repaint());
+            for e in &server.errors {
+                self.toasts.push(Toast { text: e.clone(), at: Instant::now(), error: true });
+            }
+            self.live = Some(server);
+            self.live_started = Some(Instant::now());
+        }
 
+        let ips = net::local_ipv4_named();
         let Some(live) = &self.live else {
+            // Readiness checklist, evaluated live.
             theme::card(ui, |ui| {
                 ui.set_width(ui.available_width());
-                ui.label(theme::heading("Before you start", 18.0));
-                for (n, t) in [
-                    ("1", "Connect this PC and the students' PCs to the same router, switch or hotspot. Internet is not required."),
-                    ("2", "Export the exam (Settings & export). The live session shares that exact file with students."),
-                    ("3", "Click \"Allow through firewall\" once, then Start session."),
-                    ("4", "Students open the download address in any browser, run the exam, and appear here."),
-                ] {
+                ui.label(theme::eyebrow("Ready to start"));
+                ui.add_space(4.0);
+                let check = |ui: &mut egui::Ui, ok: bool, title: &str, detail: &str| {
                     ui.horizontal(|ui| {
-                        theme::pill(ui, n, p.accent);
-                        ui.label(t);
+                        ui.label(RichText::new(if ok { icon::CHECK } else { icon::WARNING }).size(15.0).color(if ok { p.success } else { p.warning }));
+                        ui.vertical(|ui| {
+                            ui.spacing_mut().item_spacing.y = 1.0;
+                            ui.label(RichText::new(title).font(theme::semibold(14.0)));
+                            ui.add(egui::Label::new(theme::muted(detail).size(12.5)).wrap());
+                        });
                     });
+                    ui.add_space(4.0);
+                };
+                if ips.is_empty() {
+                    check(ui, false, "No network", "Connect this PC to the classroom Wi-Fi, switch or hotspot. Internet isn't needed.");
+                } else {
+                    let list = ips.iter().map(|(n, ip)| format!("{n}: {ip}")).collect::<Vec<_>>().join("   ·   ");
+                    check(ui, true, "Network connected", &list);
                 }
-                if self.project.last_export.as_ref().is_none_or(|p| !p.exists()) {
-                    ui.add_space(6.0);
-                    ui.label(RichText::new(format!("{}  This exam hasn't been exported yet — students won't be able to download it.", icon::WARNING)).color(p.warning));
+                match &export {
+                    Some(path) => {
+                        let mb = std::fs::metadata(path).map(|m| m.len() as f64 / 1_048_576.0).unwrap_or(0.0);
+                        check(ui, true, "Exam file ready to share", &format!("{} · {mb:.0} MB", path.file_name().map(|f| f.to_string_lossy().into_owned()).unwrap_or_default()));
+                    }
+                    None => {
+                        check(ui, false, "Exam not exported yet", "Students download the exported .exe from this PC. Export it first in Settings & export.");
+                        if ui.button(format!("{}  Export now", icon::EXPORT)).clicked() {
+                            self.export();
+                        }
+                    }
                 }
+                match self.firewall_ok {
+                    Some(true) => check(ui, true, "Firewall allows students in", "HDJLabs is allowed through Windows Firewall."),
+                    _ => check(ui, false, "Firewall permission needed", "When you press Start session, Windows asks once for permission. Accept it so students' PCs can connect."),
+                }
+                ui.add_space(4.0);
+                ui.label(theme::muted("Students then open the address shown here in any browser, run the exam, and appear in the list below.").size(12.5));
             });
             return;
         };
 
-        // Connection card.
-        let ips = net::local_ipv4();
+        // Session card: where students go, and what's happening on the network right now.
         let http = live.http_url.clone();
         let port = live.tcp_port;
+        let (waiting, downloads) = {
+            let st = live.state.lock().unwrap();
+            (st.waiting_pcs(), st.downloads.clone())
+        };
+        let since = self.live_started.map(|t| t.elapsed().as_secs() as i64).unwrap_or(0);
         theme::card(ui, |ui| {
             ui.set_width(ui.available_width());
             ui.horizontal_wrapped(|ui| {
-                ui.label(RichText::new(format!("{}  Session running", icon::NETWORK)).font(theme::semibold(15.0)).color(p.success));
+                ui.add(egui::Spinner::new().size(12.0).color(p.success));
+                ui.label(RichText::new("Session running").font(theme::semibold(15.0)).color(p.success));
+                ui.label(theme::figure(theme::fmt_secs(since), 12.5, p.muted));
                 ui.separator();
                 match &http {
                     Some(u) => {
                         ui.label(theme::muted("Students download from"));
-                        ui.label(RichText::new(u).font(theme::semibold(16.0)).color(p.accent));
+                        ui.label(RichText::new(u).font(theme::mono(15.0)).color(p.accent));
                         if theme::icon_button(ui, icon::COPY, "Copy link").clicked() {
                             ui.ctx().copy_text(u.clone());
+                            self.toasts.push(Toast { text: "Link copied".into(), at: Instant::now(), error: false });
                         }
                     }
                     None => {
                         ui.label(RichText::new("Download page off — export the exam, then restart the session.").color(p.warning));
                     }
                 }
-                ui.separator();
-                ui.label(theme::muted(format!("Teacher address: {}  (port {port})", ips.iter().map(|(i, _)| i.to_string()).collect::<Vec<_>>().join(", "))));
             });
+            ui.label(theme::muted(format!(
+                "This PC: {}   ·   exam port {port}",
+                ips.iter().map(|(n, ip)| format!("{ip} ({n})")).collect::<Vec<_>>().join(", ")
+            ))
+            .size(12.5));
+            ui.add_space(6.0);
+            ui.separator();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::eyebrow("Exam open, not signed in"));
+                if waiting.is_empty() {
+                    ui.label(theme::muted("none").size(12.5));
+                } else {
+                    ui.label(theme::figure(waiting.len().to_string(), 13.0, p.warning)).on_hover_text(waiting.join("\n"));
+                    ui.label(theme::muted(waiting.iter().take(6).cloned().collect::<Vec<_>>().join(", ")).size(12.5));
+                }
+            });
+            let active: Vec<&net::Download> = downloads.iter().filter(|d| d.finished.is_none()).collect();
+            let done = downloads.iter().filter(|d| d.finished.is_some() && !d.failed).count();
+            let failed = downloads.iter().filter(|d| d.failed).count();
+            ui.horizontal_wrapped(|ui| {
+                ui.label(theme::eyebrow("Downloads"));
+                ui.label(theme::muted(format!("{} in progress · {done} complete{}", active.len(), if failed > 0 { format!(" · {failed} interrupted") } else { String::new() })).size(12.5));
+            });
+            for d in active.iter().take(8) {
+                ui.horizontal(|ui| {
+                    ui.label(theme::figure(&d.ip, 12.5, p.text));
+                    let frac = if d.total > 0 { d.sent as f32 / d.total as f32 } else { 0.0 };
+                    ui.allocate_ui(egui::vec2(180.0, 10.0), |ui| theme::progress_bar(ui, frac, 6.0, p.accent));
+                    let secs = d.started.elapsed().as_secs_f64().max(0.1);
+                    ui.label(theme::muted(format!("{:.0}% · {:.1} of {:.0} MB · {:.1} MB/s", frac * 100.0, d.sent as f64 / 1_048_576.0, d.total as f64 / 1_048_576.0, d.sent as f64 / 1_048_576.0 / secs)).size(12.0));
+                });
+            }
         });
         ui.add_space(10.0);
 
@@ -939,8 +1132,14 @@ impl Studio {
             stat(ui, "Connected", &connected.to_string(), p.accent);
             stat(ui, "Working", &working.to_string(), p.warning);
             stat(ui, "Submitted", &submitted.to_string(), p.success);
-            stat(ui, "Total seen", &students.len().to_string(), p.muted);
+            stat(ui, "Signed in", &students.len().to_string(), p.muted);
+        });
+        ui.add_space(6.0);
+        ui.horizontal(|ui| {
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if ui.add(egui::Button::new(RichText::new(format!("{}  Remove exam from PCs", icon::DELETE)).color(p.danger)).fill(Color32::TRANSPARENT).min_size(egui::vec2(0.0, 34.0))).on_hover_text("Deletes the exam file from every connected student PC when its exam closes. Students still working are not interrupted.").clicked() {
+                    self.confirm_remove_all = true;
+                }
                 if theme::ghost(ui, &format!("{}  +5 min all", icon::CLOCK)).clicked() {
                     send.push((None, S2C::AddTime { secs: 300 }));
                 }
@@ -948,14 +1147,14 @@ impl Studio {
                     send.push((None, S2C::Message { text: self.broadcast.trim().to_string() }));
                     self.broadcast.clear();
                 }
-                theme::text_field(ui, &mut self.broadcast, "Message to all students…", 260.0);
+                theme::text_field(ui, &mut self.broadcast, "Message to all students…", f32::INFINITY);
             });
         });
         ui.add_space(10.0);
 
         let total_q = self.project.exam.delivered_count();
         ui.horizontal_top(|ui| {
-            let table_w = if self.live_selected.is_some() { ui.available_width() * 0.52 } else { ui.available_width() };
+            let table_w = if self.live_selected.is_some() { ui.available_width() * 0.6 } else { ui.available_width() };
             ui.allocate_ui_with_layout(egui::vec2(table_w, ui.available_height()), Layout::top_down(Align::Min), |ui| {
                 theme::card_frame().inner_margin(Margin::same(12)).show(ui, |ui| {
                     ui.set_width(ui.available_width());
@@ -967,8 +1166,8 @@ impl Studio {
                             ui.label(theme::muted("Waiting for students to open the exam…"));
                         });
                     }
-                    egui::ScrollArea::vertical().id_salt("roster").auto_shrink([false, false]).show(ui, |ui| {
-                        egui::Grid::new("roster-grid").num_columns(6).striped(true).spacing([16.0, 10.0]).min_col_width(40.0).show(ui, |ui| {
+                    egui::ScrollArea::both().id_salt("roster").auto_shrink([false, false]).show(ui, |ui| {
+                        egui::Grid::new("roster-grid").num_columns(6).striped(true).spacing([12.0, 10.0]).min_col_width(40.0).show(ui, |ui| {
                             for h in ["Student", "Status", "Progress", "Time left", "Alerts", "Score"] {
                                 ui.label(theme::eyebrow(h));
                             }
@@ -992,7 +1191,7 @@ impl Studio {
                                 theme::pill(ui, label, col);
                                 let (ans, tot) = s.status.as_ref().map(|x| (x.answered, x.total)).unwrap_or((0, total_q));
                                 ui.horizontal(|ui| {
-                                    ui.set_width(120.0);
+                                    ui.set_width(104.0);
                                     ui.allocate_ui(egui::vec2(70.0, 8.0), |ui| theme::progress_bar(ui, ans as f32 / tot.max(1) as f32, 6.0, p.accent));
                                     ui.label(theme::muted(format!("{ans}/{tot}")).size(12.5));
                                 });
@@ -1026,22 +1225,29 @@ impl Studio {
                             ui.set_width(ui.available_width());
                             ui.set_min_height(ui.available_height() - 30.0);
                             ui.horizontal(|ui| {
-                                ui.label(theme::heading(&s.name, 20.0));
-                                ui.label(theme::muted(format!("{} · {}", s.student_id, s.machine)));
-                                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.vertical(|ui| {
+                                    ui.spacing_mut().item_spacing.y = 1.0;
+                                    ui.add(egui::Label::new(theme::heading(&s.name, 19.0)).truncate());
+                                    ui.add(egui::Label::new(theme::figure(format!("{} · {} · {}", s.student_id, s.machine, s.addr), 11.5, p.muted)).truncate());
+                                });
+                                ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
                                     if theme::icon_button(ui, icon::CANCEL, "Close").clicked() {
                                         self.live_selected = None;
                                     }
                                 });
                             });
                             ui.horizontal(|ui| {
-                                theme::text_field(ui, &mut self.direct_msg, "Message to this student…", 220.0);
+                                theme::text_field(ui, &mut self.direct_msg, "Message to this student…", (ui.available_width() - 230.0).max(120.0));
                                 if ui.add_enabled(!self.direct_msg.trim().is_empty(), egui::Button::new(icon::SEND)).clicked() {
                                     send.push((Some(sel.clone()), S2C::Message { text: self.direct_msg.trim().to_string() }));
                                     self.direct_msg.clear();
                                 }
                                 if ui.button("+5 min").clicked() {
                                     send.push((Some(sel.clone()), S2C::AddTime { secs: 300 }));
+                                }
+                                if ui.add(egui::Button::new(RichText::new(icon::DELETE).color(p.danger))).on_hover_text("Remove the exam file from this student's PC when the exam closes").clicked() {
+                                    send.push((Some(sel.clone()), S2C::RemoveExam));
+                                    self.toasts.push(Toast { text: format!("{}'s PC will delete the exam file when it closes.", s.name), at: Instant::now(), error: false });
                                 }
                                 if s.submission.is_none() && ui.add(egui::Button::new(RichText::new("End exam").color(p.danger))).on_hover_text("Submit this student's exam now").clicked() {
                                     send.push((Some(sel.clone()), S2C::ForceSubmit));
@@ -1069,6 +1275,30 @@ impl Studio {
             }
         });
 
+        if self.confirm_remove_all {
+            let mut close = false;
+            egui::Modal::new(egui::Id::new("confirm-remove")).frame(theme::card_frame().inner_margin(Margin::same(24))).show(ui.ctx(), |ui| {
+                ui.set_width(440.0);
+                ui.label(theme::heading("Remove the exam from students' PCs?", 20.0));
+                ui.add(egui::Label::new(theme::muted("Every connected PC deletes the exam file when its exam closes. Students still working finish normally; students who have submitted see a 10-second countdown. Their encrypted result backup stays in Documents.")).wrap());
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    if theme::ghost(ui, "Cancel").clicked() {
+                        close = true;
+                    }
+                    ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                        if theme::danger(ui, &format!("{}  Remove from all PCs", icon::DELETE)).clicked() {
+                            send.push((None, S2C::RemoveExam));
+                            self.toasts.push(Toast { text: "Connected PCs will delete the exam file when it closes.".into(), at: Instant::now(), error: false });
+                            close = true;
+                        }
+                    });
+                });
+            });
+            if close {
+                self.confirm_remove_all = false;
+            }
+        }
         if let Some(live) = &self.live {
             let mut st = live.state.lock().unwrap();
             for (to, msg) in send {
@@ -1367,7 +1597,63 @@ impl Studio {
 #[cfg(debug_assertions)]
 impl Studio {
     /// Debug builds: open the sample exam on a given page with demo data, for screenshots.
+    /// Records the "how to write a good question" guide for one language, step by step.
+    fn guide_script(&mut self, lang: Lang) {
+        let step = crate::ui::shot::frame() / 30;
+        if step == 0 && self.project.exam.questions.is_empty() {
+            self.project.exam.title = "Week 3 quiz".into();
+            self.project.exam.questions.push(Question { id: 1, prompt: String::new(), points: 5.0, kind: Kind::Code(CodeSpec::new(Lang::Python)) });
+            self.selected = Some(0);
+            self.page = Page::Build;
+        }
+        let (prompt, starter, reference, input) = guide_content(lang);
+        let q = &mut self.project.exam.questions[0];
+        let Kind::Code(spec) = &mut q.kind else { return };
+        let (caption, scroll) = match step {
+            0 => ("1 · Add question → Code", 0.0),
+            1 => {
+                if spec.lang != lang {
+                    *spec = CodeSpec::new(lang);
+                }
+                ("2 · Pick the language", 0.0)
+            }
+            2 => {
+                q.prompt = prompt.into();
+                ("3 · Say exactly what to print", 0.0)
+            }
+            3 => {
+                spec.starter = starter.into();
+                (if lang == Lang::Sql { "4 · Starter query + the database students can read" } else { "4 · Give students a starting point" }, 150.0)
+            }
+            4 if lang.is_preview_only() => ("5 · Students see their page live — you grade it in Results", 380.0),
+            4 => {
+                spec.reference = reference.into();
+                if let Some(t) = spec.tests.first_mut() {
+                    t.input = input.into();
+                }
+                ("5 · Write your own solution (never shipped)", 520.0)
+            }
+            5 if lang.is_preview_only() => ("6 · Press Preview to try it as a student", 0.0),
+            5 => {
+                if spec.tests.first().is_some_and(|t| t.expected.is_empty()) {
+                    let out = runner::run(spec.lang, &spec.reference, &spec.stdin_for(input), runner::RUN_TIMEOUT);
+                    if let Some(t) = spec.tests.first_mut() {
+                        t.expected = grading::normalize_output(&out.stdout);
+                    }
+                }
+                ("6 · Run it — the expected output fills itself in", 470.0)
+            }
+            _ => ("7 · Preview as a student, then Export .exe", 0.0),
+        };
+        self.guide_caption = Some(caption.into());
+        self.guide_scroll = Some(scroll);
+    }
+
     fn shot_script(&mut self, ctx: &egui::Context) {
+        if let Some(lang) = std::env::var("HDJLABS_SHOT_GUIDE").ok().and_then(|e| Lang::ALL.into_iter().find(|l| l.ext() == e)) {
+            self.guide_script(lang);
+            return;
+        }
         let page = std::env::var("HDJLABS_SHOT_PAGE").unwrap_or_default();
         if page.is_empty() || page == "home" || self.project.exam.title != "Untitled exam" {
             return;
@@ -1410,6 +1696,18 @@ impl Studio {
         let subs = vec![demo("Sara Ali", "S-104", 6, 0), demo("Omar Khalid", "S-117", 4, 2), demo("Lina Haddad", "S-122", 5, 0), demo("Yusuf Kareem", "S-131", 2, 1)];
         match page.as_str() {
             "build" => self.page = Page::Build,
+            "live-empty" => self.page = Page::Live,
+            "live-remove" => {
+                self.page = Page::Live;
+                self.confirm_remove_all = true;
+                let c = ctx.clone();
+                self.live = Some(LiveServer::start(e.id.clone(), self.project.teacher_secret.clone(), "T".into(), 47998, None, move || c.request_repaint()));
+            }
+            "toasts" => {
+                self.page = Page::Settings;
+                self.toast("Exported C:\\Users\\Teacher\\Documents\\HDJLabs\\Exams\\Intro to Programming — Quiz 1.exe", false);
+                self.toast("Fix 2 issue(s) before exporting.", true);
+            }
             "settings" => self.page = Page::Settings,
             "results" => {
                 for s in subs {
@@ -1451,6 +1749,36 @@ impl Studio {
 }
 
 /// Question types share one neutral tag colour; only code is called out.
+/// Example content for the guide recordings: (prompt, starter, solution, input).
+#[cfg(debug_assertions)]
+fn guide_content(l: Lang) -> (&'static str, &'static str, &'static str, &'static str) {
+    match l {
+        Lang::Python => ("Read a number n and print the sum 1 + 2 + … + n.", "n = int(input())\n# print the sum of 1..n\n", "n = int(input())\nprint(n * (n + 1) // 2)\n", "10"),
+        Lang::JavaScript => ("Read a word and print it backwards.", "const word = readline();\n// print word reversed\n", "const word = readline();\nconsole.log(word.split('').reverse().join(''));\n", "exam"),
+        Lang::Sql => ("List the names of students with a grade above 80, highest grade first.", "SELECT \n", "SELECT name FROM students WHERE grade > 80 ORDER BY grade DESC;\n", ""),
+        Lang::Web => ("Make a page with the heading \"My profile\" and a button that turns it green.", "<!doctype html>\n<html>\n<body>\n  <h1 id=\"t\">My profile</h1>\n  <button>Make it green</button>\n  <script>\n    // your code\n  </script>\n</body>\n</html>\n", "", ""),
+        Lang::C => ("Read two integers and print their product.", "#include <stdio.h>\n\nint main(void) {\n    int a, b;\n    scanf(\"%d %d\", &a, &b);\n    // print a * b\n    return 0;\n}\n", "#include <stdio.h>\nint main(void){int a,b;scanf(\"%d %d\",&a,&b);printf(\"%d\\n\",a*b);return 0;}\n", "6 7"),
+        Lang::Cpp => ("Read two integers and print the larger one.", "#include <iostream>\nusing namespace std;\n\nint main() {\n    int a, b;\n    cin >> a >> b;\n    // print the larger\n}\n", "#include <iostream>\nusing namespace std;\nint main(){int a,b;cin>>a>>b;cout<<(a>b?a:b)<<endl;}\n", "4 9"),
+        Lang::Java => ("Read a name and print \"Hello, <name>!\".", "import java.util.Scanner;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner in = new Scanner(System.in);\n        // read and greet\n    }\n}\n", "import java.util.Scanner;\npublic class Main { public static void main(String[] a) { Scanner in = new Scanner(System.in); System.out.println(\"Hello, \" + in.next() + \"!\"); } }\n", "Sara"),
+        Lang::Go => ("Read n and print n squared.", "package main\n\nimport \"fmt\"\n\nfunc main() {\n    var n int\n    fmt.Scan(&n)\n    // print n*n\n}\n", "package main\nimport \"fmt\"\nfunc main(){var n int;fmt.Scan(&n);fmt.Println(n*n)}\n", "12"),
+        Lang::Rust => ("Read a line and print it in upper case.", "use std::io::stdin;\n\nfn main() {\n    let mut s = String::new();\n    stdin().read_line(&mut s).unwrap();\n    // print s in upper case\n}\n", "use std::io::stdin;\nfn main(){let mut s=String::new();stdin().read_line(&mut s).unwrap();println!(\"{}\",s.trim().to_uppercase());}\n", "hdjlabs"),
+    }
+}
+
+fn lang_tip(l: Lang) -> &'static str {
+    match l {
+        Lang::Python => "Students read input with input() and print the answer. Built into the exam, so it works on every PC.",
+        Lang::JavaScript => "Students read lines with readline() and print with console.log(). Built into the exam, so it works on every PC.",
+        Lang::Sql => "Put CREATE TABLE and INSERT statements in the database box. Students write queries; results print as a header row followed by `value | value` rows. Built in (SQLite).",
+        Lang::Web => "Students write one HTML page — CSS in <style>, JavaScript in <script> — and see it live beside the editor.",
+        Lang::C => "Needs gcc or clang on the students' PCs (MinGW / MSYS2). Students read input with scanf.",
+        Lang::Cpp => "Needs g++ or clang++ on the students' PCs (MinGW / MSYS2). Students read input with cin.",
+        Lang::Java => "Needs a JDK on the students' PCs. The class must be called Main. Students read input with Scanner.",
+        Lang::Go => "Needs Go on the students' PCs. Students read input with fmt.Scan.",
+        Lang::Rust => "Needs Rust (rustc) on the students' PCs. Students read input from std::io::stdin.",
+    }
+}
+
 fn kind_color(k: &Kind) -> Color32 {
     let p = pal();
     match k {
@@ -1482,7 +1810,8 @@ pub fn sample_exam() -> Exam {
         Question { id: 1, prompt: "Which data structure works in a First-In, First-Out order?".into(), points: 1.0, kind: Kind::Choice { options: vec!["Stack".into(), "Queue".into(), "Binary tree".into(), "Hash map".into()], correct: vec![1], multiple: false } },
         Question { id: 2, prompt: "Select every language that is compiled ahead of time to native code by default.".into(), points: 2.0, kind: Kind::Choice { options: vec!["C".into(), "Python".into(), "Rust".into(), "JavaScript".into()], correct: vec![0, 2], multiple: true } },
         Question { id: 3, prompt: "In Python, `len(\"hello\")` returns 5.".into(), points: 1.0, kind: Kind::TrueFalse { answer: true } },
-        Question { id: 4, prompt: "What keyword defines a function in Python?".into(), points: 1.0, kind: Kind::Short { accepted: vec!["def".into()], case_sensitive: true } },
+        Question { id: 4, prompt: "What keyword defines a function in Python?".into(), points: 1.0, kind: Kind::Short { accepted: vec!["def".into()], case_sensitive: true, show_format: true } },
+        Question { id: 9, prompt: "Capture the flag: what is printed by the lab server? (copy it exactly)".into(), points: 2.0, kind: Kind::Short { accepted: vec!["HDJ{l0ck3d_d0wn!}".into()], case_sensitive: true, show_format: true } },
         Question {
             id: 5,
             prompt: "Read an integer n and print the sum 1 + 2 + … + n.".into(),
@@ -1496,6 +1825,8 @@ pub fn sample_exam() -> Exam {
                     TestCase { input: "1000".into(), expected: "500500".into(), hidden: true },
                 ],
                 reference: "n = int(input())\nprint(n * (n + 1) // 2)\n".into(),
+                setup: String::new(),
+                simple: false,
             }),
         },
         Question {
@@ -1507,23 +1838,41 @@ pub fn sample_exam() -> Exam {
                 starter: "const line = readline();\n// print the reversed line\n".into(),
                 tests: vec![TestCase { input: "abc".into(), expected: "cba".into(), hidden: false }, TestCase { input: "HDJLabs".into(), expected: "sbaLJDH".into(), hidden: true }],
                 reference: "const line = readline();\nconsole.log(line.split('').reverse().join(''));\n".into(),
+                setup: String::new(),
+                simple: false,
             }),
+        },
+        Question {
+            id: 7,
+            prompt: "List the names of students with a grade above 80, highest grade first.".into(),
+            points: 3.0,
+            kind: Kind::Code(CodeSpec {
+                lang: Lang::Sql,
+                starter: "-- Write your query below\nSELECT \n".into(),
+                tests: vec![TestCase { input: String::new(), expected: "name\nSara\nLina".into(), hidden: false }],
+                reference: "SELECT name FROM students WHERE grade > 80 ORDER BY grade DESC;".into(),
+                setup: Lang::sql_setup_template().into(),
+                simple: true,
+            }),
+        },
+        Question {
+            id: 8,
+            prompt: "Build a page with a heading \"My profile\", a short paragraph about you, and a button that changes the heading colour when clicked.".into(),
+            points: 4.0,
+            kind: Kind::Code(CodeSpec::new(Lang::Web)),
         },
     ];
     e
 }
 
-pub fn run() -> i32 {
-    let viewport = egui::ViewportBuilder::default().with_title("HDJLabs Studio").with_inner_size([1360.0, 860.0]).with_min_inner_size([1040.0, 640.0]).with_icon(crate::ui::app_icon());
-    let options = eframe::NativeOptions { viewport, ..Default::default() };
-    let r = eframe::run_native(
-        "HDJLabs Studio",
-        options,
-        Box::new(|cc| {
-            theme::install_fonts(&cc.egui_ctx);
-            theme::apply_style(&cc.egui_ctx);
-            Ok(Box::new(Studio::new()))
-        }),
-    );
-    if r.is_ok() { 0 } else { crate::EXIT_UI_FAILED }
+pub fn run(project: Option<PathBuf>) -> i32 {
+    let (size, min) = crate::ui::fit_to_screen([1360.0, 860.0], [1040.0, 640.0]);
+    let viewport = egui::ViewportBuilder::default().with_title("HDJLabs Studio").with_inner_size(size).with_min_inner_size(min).with_icon(crate::ui::app_icon());
+    crate::ui::launch("HDJLabs Studio", viewport, move |_| {
+        let mut studio = Studio::new();
+        if let Some(p) = project.clone() {
+            studio.open_path(p);
+        }
+        studio
+    })
 }

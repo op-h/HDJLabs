@@ -19,6 +19,7 @@ pub fn exec_main(args: &[String]) -> i32 {
     match lang.as_str() {
         "python" => run_python(&src),
         "js" => run_js(&src),
+        "sql" => run_sql(&src),
         _ => {
             eprintln!("unknown language {lang}");
             2
@@ -36,6 +37,72 @@ fn run_python(src: &str) -> i32 {
             .map(|_| ())
     });
     code as i32
+}
+
+/// Runs the database setup from stdin, then each statement of the student's query; every
+/// result set is printed as `col | col` lines with a header row.
+fn run_sql(src: &str) -> i32 {
+    use std::io::Read;
+    let mut setup = String::new();
+    let _ = std::io::stdin().read_to_string(&mut setup);
+    let conn = match rusqlite::Connection::open_in_memory() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("SQLite: {e}");
+            return 1;
+        }
+    };
+    if let Err(e) = conn.execute_batch(&setup) {
+        eprintln!("Database setup failed: {e}");
+        return 1;
+    }
+    let mut out = std::io::stdout().lock();
+    let mut batch = rusqlite::Batch::new(&conn, src);
+    loop {
+        let mut stmt = match batch.next() {
+            Ok(Some(s)) => s,
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("SQL error: {e}");
+                return 1;
+            }
+        };
+        let cols = stmt.column_count();
+        if cols == 0 {
+            if let Err(e) = stmt.raw_execute() {
+                eprintln!("SQL error: {e}");
+                return 1;
+            }
+            continue;
+        }
+        let names: Vec<String> = stmt.column_names().iter().map(|s| s.to_string()).collect();
+        let _ = writeln!(out, "{}", names.join(" | "));
+        let mut rows = stmt.raw_query();
+        loop {
+            match rows.next() {
+                Ok(Some(row)) => {
+                    let vals: Vec<String> = (0..cols)
+                        .map(|i| match row.get_ref(i) {
+                            Ok(rusqlite::types::ValueRef::Null) => "NULL".into(),
+                            Ok(rusqlite::types::ValueRef::Integer(v)) => v.to_string(),
+                            Ok(rusqlite::types::ValueRef::Real(v)) => v.to_string(),
+                            Ok(rusqlite::types::ValueRef::Text(t)) => String::from_utf8_lossy(t).into_owned(),
+                            Ok(rusqlite::types::ValueRef::Blob(b)) => format!("<{} bytes>", b.len()),
+                            Err(e) => format!("<{e}>"),
+                        })
+                        .collect();
+                    let _ = writeln!(out, "{}", vals.join(" | "));
+                }
+                Ok(None) => break,
+                Err(e) => {
+                    eprintln!("SQL error: {e}");
+                    return 1;
+                }
+            }
+        }
+    }
+    let _ = out.flush();
+    0
 }
 
 fn run_js(src: &str) -> i32 {

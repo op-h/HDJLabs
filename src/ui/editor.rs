@@ -159,7 +159,9 @@ pub fn code_editor(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, code: &mut 
     }
 
     egui::Frame::new().fill(p.code_bg).corner_radius(egui::CornerRadius::same(10)).show(ui, |ui| {
-        egui::ScrollArea::both().id_salt(("code-scroll", id)).auto_shrink([false, false]).show(ui, |ui| {
+        // Vertical scrolling moves numbers and code together; only the code scrolls sideways,
+        // so the line-number gutter stays visible.
+        egui::ScrollArea::vertical().id_salt(("code-scroll", id)).auto_shrink([false, false]).show(ui, |ui| {
             ui.horizontal_top(|ui| {
                 ui.spacing_mut().item_spacing.x = 0.0;
                 let width = format!("{lines}").len().max(2);
@@ -170,15 +172,23 @@ pub fn code_editor(ui: &mut egui::Ui, id_salt: impl std::hash::Hash, code: &mut 
                 });
                 let mut layouter = |ui: &egui::Ui, buf: &dyn egui::TextBuffer, wrap: f32| {
                     let mut job = highlight(ui.ctx(), ui.style(), &theme, buf.as_str(), &ext);
-                    job.wrap.max_width = wrap;
-                    ui.fonts(|f| f.layout_job(job))
+                    let _ = wrap;
+                    job.wrap.max_width = f32::INFINITY;
+                    ui.fonts_mut(|f| f.layout_job(job))
                 };
-                let edit = if read_only {
-                    let mut view: &str = code.as_str();
-                    ui.add(egui::TextEdit::multiline(&mut view).id(id).code_editor().frame(false).desired_width(f32::INFINITY).desired_rows(lines).layouter(&mut layouter).margin(egui::Margin::symmetric(4, 4)))
-                } else {
-                    ui.add(egui::TextEdit::multiline(code).id(id).code_editor().frame(false).lock_focus(true).desired_width(f32::INFINITY).desired_rows(lines.max(8)).layouter(&mut layouter).margin(egui::Margin::symmetric(4, 4)))
-                };
+                let edit = egui::ScrollArea::horizontal()
+                    .id_salt(("code-hscroll", id))
+                    .auto_shrink([false, true])
+                    .show(ui, |ui| {
+                        let w = ui.available_width() - 8.0;
+                        if read_only {
+                            let mut view: &str = code.as_str();
+                            ui.add(egui::TextEdit::multiline(&mut view).id(id).code_editor().frame(egui::Frame::NONE).desired_width(w).desired_rows(lines).layouter(&mut layouter).margin(egui::Margin::symmetric(4, 4)))
+                        } else {
+                            ui.add(egui::TextEdit::multiline(code).id(id).code_editor().frame(egui::Frame::NONE).lock_focus(true).desired_width(w).desired_rows(lines.max(8)).layouter(&mut layouter).margin(egui::Margin::symmetric(4, 4)))
+                        }
+                    })
+                    .inner;
                 if edit.changed() {
                     out.changed = true;
                     if let Some(mut state) = egui::TextEdit::load_state(ui.ctx(), id) {

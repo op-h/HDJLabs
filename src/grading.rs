@@ -52,7 +52,7 @@ pub fn grade_static(q: &Question, a: &Answer) -> QuestionResult {
         (Kind::TrueFalse { answer }, Answer::Bool(b)) => {
             if answer == b { result(q, q.points, Status::Correct) } else { result(q, 0.0, Status::Wrong) }
         }
-        (Kind::Short { accepted, case_sensitive }, Answer::Text(t)) => {
+        (Kind::Short { accepted, case_sensitive, .. }, Answer::Text(t)) => {
             let got = normalize_text(t, *case_sensitive);
             if accepted.iter().any(|acc| !acc.trim().is_empty() && normalize_text(acc, *case_sensitive) == got) {
                 result(q, q.points, Status::Correct)
@@ -79,7 +79,7 @@ pub fn run_tests(spec: &CodeSpec, lang: Lang, source: &str, include_hidden: bool
         .iter()
         .filter(|t| include_hidden || !t.hidden)
         .map(|t| {
-            let out = runner::run(lang, source, &t.input, runner::RUN_TIMEOUT);
+            let out = runner::run(lang, source, &spec.stdin_for(&t.input), runner::RUN_TIMEOUT);
             TestOutcome {
                 passed: out.ok() && outputs_match(&out.stdout, &t.expected),
                 hidden: t.hidden,
@@ -98,7 +98,7 @@ pub fn grade_code(q: &Question, a: &Answer) -> QuestionResult {
     if source.trim().is_empty() || source.trim() == spec.starter.trim() {
         return result(q, 0.0, Status::Unanswered);
     }
-    if spec.tests.is_empty() {
+    if spec.tests.is_empty() || spec.lang.is_preview_only() {
         return result(q, 0.0, Status::Review);
     }
     let outcomes = run_tests(spec, *lang, source, true);
@@ -144,11 +144,12 @@ mod tests {
 
     #[test]
     fn short_answer_normalizes() {
-        let s = q(Kind::Short { accepted: vec!["Responsive  Design".into(), "rwd".into()], case_sensitive: false });
+        let s = q(Kind::Short { accepted: vec!["Responsive  Design".into(), "rwd".into()], case_sensitive: false, show_format: false });
         assert_eq!(grade_static(&s, &Answer::Text("  responsive design ".into())).status, Status::Correct);
         assert_eq!(grade_static(&s, &Answer::Text("RWD".into())).status, Status::Correct);
         assert_eq!(grade_static(&s, &Answer::Text("design".into())).status, Status::Wrong);
-        let cs = q(Kind::Short { accepted: vec!["NaCl".into()], case_sensitive: true });
+        let cs = q(Kind::Short { accepted: vec!["NaCl".into()], case_sensitive: true, show_format: true });
+        assert_eq!(answer_format("THM{h3ll0_w0rld!} ok"), "***{*****_*****!} **");
         assert_eq!(grade_static(&cs, &Answer::Text("nacl".into())).status, Status::Wrong);
     }
 

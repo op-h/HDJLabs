@@ -81,6 +81,8 @@ pub enum S2C {
     Message { text: String },
     AddTime { secs: i64 },
     ForceSubmit,
+    /// Delete the exam file from this PC when the exam closes.
+    RemoveExam,
     SubmitAck,
     Pong,
 }
@@ -121,6 +123,21 @@ pub fn local_ipv4() -> Vec<(Ipv4Addr, Ipv4Addr)> {
     v
 }
 
+/// Like `local_ipv4`, with the adapter's name ("Wi-Fi", "Ethernet") for display.
+pub fn local_ipv4_named() -> Vec<(String, Ipv4Addr)> {
+    let mut v = Vec::new();
+    if let Ok(ifs) = if_addrs::get_if_addrs() {
+        for i in ifs {
+            if let if_addrs::IfAddr::V4(a) = &i.addr {
+                if !a.ip.is_loopback() && !a.ip.is_link_local() {
+                    v.push((i.name.clone(), a.ip));
+                }
+            }
+        }
+    }
+    v
+}
+
 fn broadcast_targets() -> Vec<Ipv4Addr> {
     let mut v = vec![Ipv4Addr::BROADCAST];
     for (ip, mask) in local_ipv4() {
@@ -149,15 +166,45 @@ pub struct StudentLive {
     pub submission: Option<Submission>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Debug)]
+pub struct Download {
+    pub ip: String,
+    pub sent: u64,
+    pub total: u64,
+    pub started: Instant,
+    pub finished: Option<Instant>,
+    pub failed: bool,
+}
+
 pub struct LiveState {
     pub students: Vec<StudentLive>,
     pub log: Vec<String>,
     outboxes: HashMap<String, Sender<S2C>>,
     pub dirty: bool,
+    /// PCs whose exam is open and looking for us (from discovery), by IP.
+    pub seen_pcs: HashMap<String, Instant>,
+    pub downloads: Vec<Download>,
+}
+
+impl Default for LiveState {
+    fn default() -> Self {
+        LiveState { students: vec![], log: vec![], outboxes: HashMap::new(), dirty: false, seen_pcs: HashMap::new(), downloads: vec![] }
+    }
 }
 
 impl LiveState {
+    /// PCs with the exam open that haven't signed in yet (seen in the last 15 s).
+    pub fn waiting_pcs(&self) -> Vec<String> {
+        let mut v: Vec<String> = self
+            .seen_pcs
+            .iter()
+            .filter(|(ip, t)| t.elapsed() < Duration::from_secs(15) && !self.students.iter().any(|s| s.connected && &s.addr == *ip))
+            .map(|(ip, _)| ip.clone())
+            .collect();
+        v.sort();
+        v
+    }
+
     pub fn send(&mut self, attempt_id: &str, msg: S2C) {
         if let Some(tx) = self.outboxes.get(attempt_id) {
             let _ = tx.send(msg);
@@ -230,6 +277,7 @@ impl LiveServer {
                 let _ = sock.set_read_timeout(Some(Duration::from_millis(500)));
                 let stop = stop.clone();
                 let reply = format!("HDJL!{exam_id}|{tcp_port}|{teacher_name}");
+                let seen_state = state.clone();
                 let want = format!("HDJL?{exam_id}");
                 std::thread::spawn(move || {
                     let mut buf = [0u8; 256];
@@ -237,6 +285,11 @@ impl LiveServer {
                         if let Ok((n, from)) = sock.recv_from(&mut buf) {
                             if &buf[..n] == want.as_bytes() {
                                 let _ = sock.send_to(reply.as_bytes(), from);
+                                if let Ok(mut st) = seen_state.lock() {
+                                    if st.seen_pcs.len() < 2000 {
+                                        st.seen_pcs.insert(from.ip().to_string(), Instant::now());
+                                    }
+                                }
                             }
                         }
                     }
@@ -253,7 +306,8 @@ impl LiveServer {
                     http_url = Some(format!("http://{ip}:{HTTP_PORT}/"));
                     let _ = l.set_nonblocking(true);
                     let stop = stop.clone();
-                    std::thread::spawn(move || serve_http(l, exe, title, stop));
+                    let st = state.clone();
+                    std::thread::spawn(move || serve_http(l, exe, title, stop, st));
                 }
                 Err(e) => errors.push(format!("Download page port {HTTP_PORT} unavailable: {e}")),
             }
@@ -311,7 +365,11 @@ fn serve_student(
     }
     let eph: [u8; 32] = hello[36..].try_into().unwrap();
     let (mut rx_c, mut tx_c) = crypto::server_session(secret, exam_id, eph).map_err(std::io::Error::other)?;
-    let first: C2S = read_frame(&mut stream, &mut rx_c)?;
+    let first: C2S = match read_frame(&mut stream, &mut rx_c) {
+        Ok(m) => m,
+        Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
+        Err(e) => return Err(e),
+    };
     let C2S::Hello { attempt_id, name, student_id, machine } = first else {
         return Err(std::io::Error::other("expected hello"));
     };
@@ -434,10 +492,10 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
-fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>) {
+fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>, state: Arc<Mutex<LiveState>>) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
     while !stop.load(Ordering::Relaxed) {
-        let Ok((mut s, _)) = l.accept() else {
+        let Ok((mut s, peer)) = l.accept() else {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
@@ -447,6 +505,7 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
         };
         let exe = exe.clone();
         let title = title.clone();
+        let state = state.clone();
         std::thread::spawn(move || {
             let _slot = slot;
             let _ = s.set_nonblocking(false);
@@ -469,7 +528,40 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
                     Ok(mut f) => {
                         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
                         let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.microsoft.portable-executable\r\nContent-Length: {len}\r\nContent-Disposition: attachment; filename=\"{file_name}\"\r\nConnection: close\r\n\r\n");
-                        let _ = std::io::copy(&mut f, &mut s);
+                        let idx = {
+                            let mut st = state.lock().unwrap();
+                            if st.downloads.len() >= 500 {
+                                st.downloads.remove(0);
+                            }
+                            st.downloads.push(Download { ip: peer.ip().to_string(), sent: 0, total: len, started: Instant::now(), finished: None, failed: false });
+                            st.downloads.len() - 1
+                        };
+                        let mut buf = vec![0u8; 256 * 1024];
+                        let mut sent = 0u64;
+                        let ok = loop {
+                            match f.read(&mut buf) {
+                                Ok(0) => break true,
+                                Ok(n) => {
+                                    if s.write_all(&buf[..n]).is_err() {
+                                        break false;
+                                    }
+                                    sent += n as u64;
+                                    if let Ok(mut st) = state.lock() {
+                                        if let Some(d) = st.downloads.get_mut(idx) {
+                                            d.sent = sent;
+                                        }
+                                    }
+                                }
+                                Err(_) => break false,
+                            }
+                        };
+                        if let Ok(mut st) = state.lock() {
+                            if let Some(d) = st.downloads.get_mut(idx) {
+                                d.finished = Some(Instant::now());
+                                d.failed = !ok || sent < len;
+                            }
+                            st.dirty = true;
+                        }
                     }
                     Err(_) => {
                         let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
@@ -502,7 +594,11 @@ small{display:block;margin-top:18px;color:#6b7690}</style></head><body><div clas
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum Conn {
+    /// Broadcasting on the network for the teacher's Studio.
     Searching,
+    /// Teacher answered; we join once the student signs in.
+    Found(String),
+    Connecting(String),
     Connected(String),
     Offline(String),
 }
@@ -544,18 +640,29 @@ impl LanClient {
                         })
                     };
                     match target {
+                        Some(addr) if outbox.lock().unwrap().hello.is_none() => {
+                            // Signed-out: just remember we found the teacher.
+                            failures = 0;
+                            *conn.lock().unwrap() = Conn::Found(addr.ip().to_string());
+                        }
                         Some(addr) => {
+                            *conn.lock().unwrap() = Conn::Connecting(addr.ip().to_string());
                             if let Err(e) = client_session(addr, &exam_id, &teacher_pub, &outbox, &conn, &tx, &stop) {
                                 failures += 1;
-                                *conn.lock().unwrap() = Conn::Offline(e.to_string());
+                                let why = match e.kind() {
+                                    std::io::ErrorKind::ConnectionRefused => "the teacher's session isn't running".to_string(),
+                                    std::io::ErrorKind::TimedOut | std::io::ErrorKind::WouldBlock => "the teacher's PC didn't answer (firewall?)".to_string(),
+                                    _ => e.to_string(),
+                                };
+                                *conn.lock().unwrap() = Conn::Offline(why);
                             }
                         }
                         None => {
                             failures += 1;
-                            *conn.lock().unwrap() = if failures > 2 { Conn::Offline("No teacher found on this network".into()) } else { Conn::Searching };
+                            *conn.lock().unwrap() = if failures > 2 { Conn::Offline("no teacher found on this network".into()) } else { Conn::Searching };
                         }
                     }
-                    std::thread::sleep(Duration::from_secs(2));
+                    std::thread::sleep(Duration::from_millis(if outbox.lock().unwrap().hello.is_some() { 1500 } else { 2500 }));
                 }
             });
         }

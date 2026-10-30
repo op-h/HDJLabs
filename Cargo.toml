@@ -1,6 +1,6 @@
 [package]
 name = "hdjlabs"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["OPH <https://github.com/op-h>"]
 description = "HDJLabs — build secure offline exams and run them as locked-down Windows apps over the classroom LAN"
@@ -13,9 +13,10 @@ name = "HDJLabs"
 path = "src/main.rs"
 
 [dependencies]
-egui = "0.32"
-eframe = { version = "0.32", default-features = false, features = ["default_fonts", "glow"] }
-egui_extras = { version = "0.32", default-features = false, features = ["syntect"] }
+egui = "0.34"
+eframe = { version = "0.34", default-features = false, features = ["default_fonts", "glow"] }
+egui_extras = { version = "0.34", default-features = false, features = ["syntect", "file", "image", "gif"] }
+image = { version = "0.25", default-features = false, features = ["gif", "png"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 chacha20poly1305 = "0.10"
@@ -31,6 +32,10 @@ rfd = "0.15"
 rustpython = { version = "0.4", default-features = false, features = ["stdlib", "freeze-stdlib"] }
 rustpython-vm = "0.4"
 boa_engine = "0.22"
+rusqlite = { version = "0.31", features = ["bundled"] }
+wry = { version = "0.53", default-features = false, features = ["os-webview"] }
+raw-window-handle = "0.6"
+egui_software_backend = { version = "0.0.3", features = ["rayon"] }
 
 [target.'cfg(windows)'.dependencies]
 winreg = "0.55"

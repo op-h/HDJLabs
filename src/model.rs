@@ -12,12 +12,18 @@ pub enum Lang {
     Java,
     Go,
     Rust,
+    /// SQLite, built in. The teacher's setup script creates the tables first.
+    Sql,
+    /// One HTML document with its CSS and JavaScript, shown in a live preview.
+    Web,
 }
 
 impl Lang {
-    pub const ALL: [Lang; 7] = [
+    pub const ALL: [Lang; 9] = [
         Lang::Python,
         Lang::JavaScript,
+        Lang::Sql,
+        Lang::Web,
         Lang::C,
         Lang::Cpp,
         Lang::Java,
@@ -34,6 +40,8 @@ impl Lang {
             Lang::Java => "Java",
             Lang::Go => "Go",
             Lang::Rust => "Rust",
+            Lang::Sql => "SQL",
+            Lang::Web => "HTML / CSS / JS",
         }
     }
 
@@ -47,6 +55,8 @@ impl Lang {
             Lang::Java => "java",
             Lang::Go => "go",
             Lang::Rust => "rs",
+            Lang::Sql => "sql",
+            Lang::Web => "html",
         }
     }
 
@@ -59,6 +69,8 @@ impl Lang {
             Lang::Cpp => "main.cpp",
             Lang::Go => "main.go",
             Lang::Rust => "main.rs",
+            Lang::Sql => "query.sql",
+            Lang::Web => "index.html",
         }
     }
 
@@ -71,7 +83,19 @@ impl Lang {
             Lang::Java => "import java.util.Scanner;\n\npublic class Main {\n    public static void main(String[] args) {\n        Scanner in = new Scanner(System.in);\n        String name = in.next();\n        System.out.println(\"Hello, \" + name);\n    }\n}\n",
             Lang::Go => "package main\n\nimport \"fmt\"\n\nfunc main() {\n    var name string\n    fmt.Scan(&name)\n    fmt.Println(\"Hello,\", name)\n}\n",
             Lang::Rust => "use std::io::stdin;\n\nfn main() {\n    let mut name = String::new();\n    stdin().read_line(&mut name).unwrap();\n    println!(\"Hello, {}\", name.trim());\n}\n",
+            Lang::Sql => "-- Write your query below\nSELECT name, grade\nFROM students\nORDER BY grade DESC;\n",
+            Lang::Web => "<!doctype html>\n<html>\n<head>\n  <style>\n    body { font-family: sans-serif; margin: 24px; }\n    h1 { color: #2d6a4f; }\n  </style>\n</head>\n<body>\n  <h1>Hello</h1>\n  <button id=\"btn\">Click me</button>\n  <p id=\"out\"></p>\n\n  <script>\n    document.getElementById(\"btn\").onclick = () => {\n      document.getElementById(\"out\").textContent = \"Clicked!\";\n    };\n  </script>\n</body>\n</html>\n",
         }
+    }
+
+    /// Default database for new SQL questions.
+    pub fn sql_setup_template() -> &'static str {
+        "CREATE TABLE students (id INTEGER PRIMARY KEY, name TEXT, grade INTEGER);\nINSERT INTO students (name, grade) VALUES\n  ('Sara', 91), ('Omar', 78), ('Lina', 85);\n"
+    }
+
+    /// Languages whose answers are graded by reading/previewing rather than by tests.
+    pub fn is_preview_only(self) -> bool {
+        self == Lang::Web
     }
 }
 
@@ -91,6 +115,34 @@ pub struct CodeSpec {
     /// Teacher's own solution. Kept in the project file only — stripped on export.
     #[serde(default)]
     pub reference: String,
+    /// SQL only: script that creates and fills the tables before the student's query runs.
+    #[serde(default)]
+    pub setup: String,
+    /// Simple mode: one expected output, no stdin, no hidden tests.
+    #[serde(default)]
+    pub simple: bool,
+}
+
+impl CodeSpec {
+    pub fn new(lang: Lang) -> Self {
+        CodeSpec {
+            lang,
+            starter: lang.template().into(),
+            tests: if lang.is_preview_only() { vec![] } else { vec![TestCase { input: String::new(), expected: String::new(), hidden: false }] },
+            reference: String::new(),
+            setup: if lang == Lang::Sql { Lang::sql_setup_template().into() } else { String::new() },
+            simple: true,
+        }
+    }
+
+    /// What the program receives on stdin for a test input (SQL gets the database setup first).
+    pub fn stdin_for(&self, input: &str) -> String {
+        if self.lang == Lang::Sql {
+            format!("{}\n{}", self.setup, input)
+        } else {
+            input.to_string()
+        }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -106,6 +158,9 @@ pub enum Kind {
     Short {
         accepted: Vec<String>,
         case_sensitive: bool,
+        /// Show the answer's shape in the box, TryHackMe style: `***{****_***}`.
+        #[serde(default)]
+        show_format: bool,
     },
     Code(CodeSpec),
 }
@@ -150,6 +205,9 @@ pub struct Settings {
     pub block_vm: bool,
     pub block_remote_tools: bool,
     pub lan_port: u16,
+    /// Delete the exam .exe from the student's PC once they have submitted.
+    #[serde(default)]
+    pub remove_after_submit: bool,
 }
 
 impl Default for Settings {
@@ -166,6 +224,7 @@ impl Default for Settings {
             block_vm: false,
             block_remote_tools: true,
             lan_port: crate::net::DEFAULT_TCP_PORT,
+            remove_after_submit: false,
         }
     }
 }
@@ -340,6 +399,11 @@ pub struct Submission {
     pub violations: Vec<Violation>,
     /// Submitted by the timer or by the teacher rather than the student.
     pub forced: bool,
+}
+
+/// TryHackMe-style answer format: letters and digits become `*`, everything else is shown as is.
+pub fn answer_format(answer: &str) -> String {
+    answer.trim().chars().map(|c| if c.is_alphanumeric() { '*' } else { c }).collect()
 }
 
 pub fn now_unix() -> u64 {

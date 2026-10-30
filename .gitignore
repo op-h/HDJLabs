@@ -10,3 +10,7 @@ Thumbs.db
 *~
 .idea/
 .vscode/
+
+/target-win7
+
+/dist

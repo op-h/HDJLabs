@@ -150,6 +150,10 @@ pub fn attempt_save<T: Serialize>(exam_id: &str, key: &[u8; 32], value: &T) {
     }
 }
 
+pub fn attempt_remove(exam_id: &str) {
+    let _ = std::fs::remove_file(attempt_path(exam_id));
+}
+
 pub fn attempt_load<T: for<'de> Deserialize<'de>>(exam_id: &str, key: &[u8; 32]) -> Option<T> {
     let data = std::fs::read(attempt_path(exam_id)).ok()?;
     if data.len() < 12 {

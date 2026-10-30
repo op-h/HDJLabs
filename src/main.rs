@@ -58,21 +58,55 @@ fn main() {
         let server = net::LiveServer::start(project.exam.id.clone(), project.teacher_secret.clone(), "dev".into(), project.exam.settings.lan_port, project.last_export.clone().map(|p| (p, project.exam.title.clone())), || {});
         println!("serving errors={:?} http={:?}", server.errors, server.http_url);
         let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
-        let mut seen = 0;
+        let expect: usize = std::env::var("HDJLABS_DEV_EXPECT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
+        let remove = std::env::var("HDJLABS_DEV_REMOVE").is_ok();
+        let (mut seen_log, mut last_summary, mut removed) = (0, String::new(), std::collections::HashSet::new());
+        let mut events_seen = std::collections::HashMap::<String, usize>::new();
         while std::time::Instant::now() < end {
-            std::thread::sleep(std::time::Duration::from_millis(300));
-            let st = server.state.lock().unwrap();
-            for l in st.log.iter().skip(seen) {
+            std::thread::sleep(std::time::Duration::from_millis(500));
+            let mut st = server.state.lock().unwrap();
+            for l in st.log.iter().skip(seen_log) {
                 println!("log: {l}");
             }
-            seen = st.log.len();
-            if let Some(s) = st.students.iter().find(|s| s.submission.is_some()) {
-                let sub = s.submission.as_ref().unwrap();
-                println!("SUBMISSION from {} ({}) score {}/{} answers={} events={:?}", sub.student_name, sub.student_id, sub.score, sub.max_score, sub.answers.len(), s.events);
+            seen_log = st.log.len();
+            for s in &st.students {
+                let n = events_seen.entry(s.attempt_id.clone()).or_default();
+                for (_, e) in s.events.iter().skip(*n) {
+                    println!("event: {} — {e}", s.name);
+                }
+                *n = s.events.len();
+            }
+            let dl: Vec<String> = st.downloads.iter().map(|d| format!("{} {}%{}", d.ip, if d.total > 0 { d.sent * 100 / d.total } else { 0 }, if d.finished.is_some() { if d.failed { " FAILED" } else { " done" } } else { "" })).collect();
+            let students: Vec<String> = st
+                .students
+                .iter()
+                .map(|s| {
+                    let stt = s.status.as_ref().map(|x| format!("{:?} {}/{} q{} {}s", x.phase, x.answered, x.total, x.current + 1, x.remaining_secs)).unwrap_or_default();
+                    format!("{} [{}] {} {} {}", s.name, s.addr, if s.connected { "online" } else { "OFFLINE" }, stt, s.submission.as_ref().map(|x| format!("SUBMITTED {}/{}", x.score, x.max_score)).unwrap_or_default())
+                })
+                .collect();
+            let summary = format!("waiting={:?} downloads={:?}\n  students={:#?}", st.waiting_pcs(), dl, students);
+            if summary != last_summary {
+                println!("{summary}");
+                last_summary = summary;
+            }
+            let subs: Vec<String> = st.students.iter().filter(|s| s.submission.is_some()).map(|s| s.attempt_id.clone()).collect();
+            if remove {
+                for id in &subs {
+                    if removed.insert(id.clone()) {
+                        st.send(id, net::S2C::RemoveExam);
+                        println!("sent RemoveExam to {id}");
+                    }
+                }
+            }
+            if subs.len() >= expect {
+                drop(st);
+                std::thread::sleep(std::time::Duration::from_secs(20));
+                println!("all {expect} submissions received");
                 return;
             }
         }
-        println!("no submission received");
+        println!("time limit reached");
         return;
     }
 
@@ -84,7 +118,9 @@ fn main() {
         }
     };
     let Some(pkg) = pkg else {
-        std::process::exit(ui::studio::run());
+        // Double-clicking a .hdjx project opens it in the Studio.
+        let project = args.get(1).map(std::path::PathBuf::from).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("hdjx")) && p.is_file());
+        std::process::exit(ui::studio::run(project));
     };
 
     let code = match flag {
@@ -134,11 +170,13 @@ fn host_lockdown(pkg: &payload::Package) -> i32 {
     let _mutex = lockdown::hold_running_mutex();
     let _guard = lockdown::SystemGuard::apply();
     let started = std::time::Instant::now();
-    match lockdown::run_on_private_desktop("--exam-child") {
+    let code = match lockdown::run_on_private_desktop("--exam-child") {
         Ok(c) if c as i32 == EXIT_UI_FAILED && started.elapsed().as_secs() < 20 => run_fallback(),
         Ok(c) => c as i32,
         Err(_) => run_fallback(),
-    }
+    };
+    lockdown::perform_requested_removal();
+    code
 }
 
 /// Private desktop unavailable (rare drivers / policies): lock down inside the normal desktop.

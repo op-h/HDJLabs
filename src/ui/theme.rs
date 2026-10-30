@@ -61,8 +61,8 @@ pub fn pal() -> Palette {
             bg: Color32::from_rgb(11, 14, 13),
             surface: Color32::from_rgb(17, 22, 21),
             surface2: Color32::from_rgb(24, 30, 28),
-            border: Color32::from_rgb(36, 44, 41),
-            border_strong: Color32::from_rgb(56, 67, 62),
+            border: Color32::from_rgb(46, 56, 52),
+            border_strong: Color32::from_rgb(68, 80, 75),
             text: Color32::from_rgb(220, 227, 223),
             muted: Color32::from_rgb(134, 147, 141),
             faint: Color32::from_rgb(84, 95, 90),
@@ -87,43 +87,42 @@ pub fn set_light(ctx: &egui::Context, light: bool) {
     apply_style(ctx);
 }
 
-/// Segoe Fluent Icons / Segoe MDL2 Assets — one line-icon family throughout.
+/// Phosphor icons (MIT), embedded so they look the same on Windows 7 through 11.
 pub mod icon {
-    pub const PLAY: &str = "\u{E768}";
-    pub const CHECK: &str = "\u{E73E}";
-    pub const FLAG: &str = "\u{E7C1}";
-    pub const CLOCK: &str = "\u{E916}";
-    pub const SAVE: &str = "\u{E74E}";
-    pub const ADD: &str = "\u{E710}";
-    pub const DELETE: &str = "\u{E74D}";
-    pub const EDIT: &str = "\u{E70F}";
-    pub const NETWORK: &str = "\u{E968}";
-    pub const LOCK: &str = "\u{E72E}";
-    pub const SEND: &str = "\u{E724}";
-    pub const OPEN: &str = "\u{E8E5}";
-    pub const SETTINGS: &str = "\u{E713}";
-    pub const UP: &str = "\u{E70E}";
-    pub const DOWN: &str = "\u{E70D}";
-    pub const BACK: &str = "\u{E72B}";
-    pub const FORWARD: &str = "\u{E72A}";
-    pub const DOWNLOAD: &str = "\u{E896}";
-    pub const CANCEL: &str = "\u{E711}";
-    pub const WARNING: &str = "\u{E7BA}";
-    pub const INFO: &str = "\u{E946}";
-    pub const SHIELD: &str = "\u{EA18}";
-    pub const COPY: &str = "\u{E8C8}";
-    pub const STOP: &str = "\u{E71A}";
-    pub const CHART: &str = "\u{E9D2}";
-    pub const DOC: &str = "\u{E8A5}";
-    pub const TESTS: &str = "\u{E9D5}";
-    pub const SUN: &str = "\u{E706}";
-    pub const MOON: &str = "\u{E708}";
-    pub const EXPORT: &str = "\u{EDE1}";
-    pub const MESSAGE: &str = "\u{E8BD}";
-    pub const ZOOM_IN: &str = "\u{E8A3}";
-    pub const ZOOM_OUT: &str = "\u{E71F}";
-    pub const UNDO: &str = "\u{E7A7}";
-    pub const LIBRARY: &str = "\u{E8F1}";
+    pub const PLAY: &str = "\u{E3D0}";
+    pub const CHECK: &str = "\u{E182}";
+    pub const FLAG: &str = "\u{E244}";
+    pub const CLOCK: &str = "\u{E492}";
+    pub const SAVE: &str = "\u{E248}";
+    pub const ADD: &str = "\u{E3D4}";
+    pub const DELETE: &str = "\u{E4A6}";
+    pub const EDIT: &str = "\u{E3B4}";
+    pub const NETWORK: &str = "\u{EDDE}";
+    pub const LOCK: &str = "\u{E308}";
+    pub const SEND: &str = "\u{E398}";
+    pub const OPEN: &str = "\u{E256}";
+    pub const SETTINGS: &str = "\u{E272}";
+    pub const UP: &str = "\u{E13C}";
+    pub const DOWN: &str = "\u{E136}";
+    pub const BACK: &str = "\u{E058}";
+    pub const FORWARD: &str = "\u{E06C}";
+    pub const DOWNLOAD: &str = "\u{E20C}";
+    pub const CANCEL: &str = "\u{E4F6}";
+    pub const WARNING: &str = "\u{E4E0}";
+    pub const INFO: &str = "\u{E2CE}";
+    pub const COPY: &str = "\u{E1CA}";
+    pub const STOP: &str = "\u{E46C}";
+    pub const CHART: &str = "\u{E150}";
+    pub const DOC: &str = "\u{E23A}";
+    pub const TESTS: &str = "\u{EADC}";
+    pub const SUN: &str = "\u{E472}";
+    pub const MOON: &str = "\u{E330}";
+    pub const EXPORT: &str = "\u{EAF0}";
+    pub const MESSAGE: &str = "\u{E17A}";
+    pub const ZOOM_IN: &str = "\u{E310}";
+    pub const ZOOM_OUT: &str = "\u{E30E}";
+    pub const UNDO: &str = "\u{E038}";
+    pub const LIBRARY: &str = "\u{E758}";
 }
 
 fn load_font(names: &[&str]) -> Option<Vec<u8>> {
@@ -146,8 +145,9 @@ pub fn install_fonts(ctx: &egui::Context) {
     let semi = add("ui-semibold", &["seguisb.ttf", "segoeuib.ttf"]);
     let mono = add("mono", &["CascadiaMono.ttf", "CascadiaCode.ttf", "consola.ttf"]);
     let mono_bold = add("mono-bold", &["CascadiaMono.ttf", "consolab.ttf"]);
-    let icons = add("icons", &["SegoeIcons.ttf", "segmdl2.ttf"]);
     let symbols = add("symbols", &["seguisym.ttf"]);
+    fonts.font_data.insert("icons".into(), Arc::new(FontData::from_static(include_bytes!("../../assets/Phosphor.ttf"))));
+    let icons = true;
 
     let mut tail = Vec::new();
     if icons {
@@ -207,7 +207,7 @@ pub fn figure(text: impl Into<String>, size: f32, color: Color32) -> RichText {
 
 pub fn apply_style(ctx: &egui::Context) {
     let p = pal();
-    let mut style = (*ctx.style()).clone();
+    let mut style = (*ctx.global_style()).clone();
     style.visuals = if is_light() { egui::Visuals::light() } else { egui::Visuals::dark() };
     let v = &mut style.visuals;
     v.panel_fill = p.bg;
@@ -262,7 +262,7 @@ pub fn apply_style(ctx: &egui::Context) {
         (TextStyle::Monospace, FontId::monospace(13.5)),
     ]
     .into();
-    ctx.set_style(style);
+    ctx.set_global_style(style);
 }
 
 pub fn card_frame() -> egui::Frame {
@@ -317,7 +317,14 @@ pub fn field_label(ui: &mut egui::Ui, text: &str) {
     ui.label(eyebrow(text));
 }
 
+/// Width for a text field that should fill the row. A finite width already includes the field's
+/// inner margin, whereas `f32::INFINITY` adds the margin on top and overflows the column.
+pub fn fill(ui: &egui::Ui, _margin_x: i8) -> f32 {
+    ui.available_width().max(40.0)
+}
+
 pub fn text_field(ui: &mut egui::Ui, value: &mut String, hint: &str, width: f32) -> egui::Response {
+    let width = if width.is_finite() { width.min(fill(ui, 10)) } else { fill(ui, 10) };
     ui.add(egui::TextEdit::singleline(value).hint_text(hint).desired_width(width).margin(Margin::symmetric(10, 8)))
 }
 

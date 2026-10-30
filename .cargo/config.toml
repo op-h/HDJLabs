@@ -1,0 +1,15 @@
+[target.x86_64-pc-windows-msvc]
+# Static C runtime: the Studio and every exported exam run on a clean PC with no VC++ redistributable.
+rustflags = ["-C", "target-feature=+crt-static"]
+
+# Windows 7 build (one binary that also runs on 8/10/11). Needs nightly + build-std:
+#   cargo +nightly-2026-10-30 build --release -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc
+# combase.dll and the PathCch API set don't exist on Windows 7; delay-load them so they're only
+# resolved if actually called (CoTaskMemFree is also exported by ole32 there).
+[target.x86_64-win7-windows-msvc]
+rustflags = [
+    "-C", "target-feature=+crt-static",
+    "-C", "link-arg=/DELAYLOAD:combase.dll",
+    "-C", "link-arg=/DELAYLOAD:api-ms-win-core-path-l1-1-0.dll",
+    "-C", "link-arg=delayimp.lib",
+]
