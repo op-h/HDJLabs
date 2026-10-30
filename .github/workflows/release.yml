@@ -37,7 +37,7 @@ jobs:
       - name: Build universal binary (Windows 7 SP1 – 11)
         env:
           CARGO_TARGET_DIR: target-win7
-        run: cargo +${{ env.NIGHTLY }} build --release --locked -Zbuild-std=std,panic_abort --target x86_64-win7-windows-msvc
+        run: cargo +${{ env.NIGHTLY }} build --release --locked "-Zbuild-std=std,panic_abort" --target x86_64-win7-windows-msvc
 
       - name: Build installer
         shell: pwsh
