@@ -1,9 +1,9 @@
 ; HDJLabs Studio installer (Inno Setup 6).
-; Build:  ISCC.exe /DAppVersion=1.3.0 /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
+; Build:  ISCC.exe /DAppVersion=1.0.0-beta /DSourceExe=path\to\HDJLabs.exe installer\HDJLabs.iss
 ; Exported exams never need this — they are single portable .exe files.
 
 #ifndef AppVersion
-  #define AppVersion "1.3.0"
+  #define AppVersion "1.0.0-beta"
 #endif
 #ifndef SourceExe
   #define SourceExe "..\target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe"
@@ -45,9 +45,12 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "Create a &desktop shortcut"; GroupDescription: "Shortcuts:"
 Name: "firewall"; Description: "Allow HDJLabs through Windows Firewall (needed for the Live classroom)"; GroupDescription: "Network:"; Check: IsAdminInstallMode
 
+[InstallDelete]
+; The animated guides were replaced by the in-app step-by-step guide (1.4).
+Type: filesandordirs; Name: "{app}\guides"
+
 [Files]
 Source: "{#SourceExe}"; DestDir: "{app}"; DestName: "HDJLabs.exe"; Flags: ignoreversion
-Source: "..\docs\guides\*.gif"; DestDir: "{app}\guides"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; DestName: "LICENSE.txt"; Flags: ignoreversion
 Source: "..\assets\Phosphor-LICENSE.txt"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\tools\lab-trust-teacher.ps1"; DestDir: "{app}\tools"; Flags: ignoreversion

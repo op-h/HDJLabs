@@ -133,7 +133,7 @@ footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
       <div class="head"><span class="eyebrow">At a glance</span><span class="eyebrow"><span class="dot"></span>v1.1</span></div>
       <dl>
         <dt>Lockdown</dt><dd>Private desktop, shortcut hook, gesture &amp; capture block</dd>
-        <dt>Questions</dt><dd>Choice, multi-answer, true/false, short (TryHackMe format), code, file upload. English and Arabic</dd>
+        <dt>Questions</dt><dd>Choice, multi-answer, true/false, short (TryHackMe format), code, with files attached. English and Arabic</dd>
         <dt>Code</dt><dd>Python, JavaScript, SQL, HTML/CSS/JS built in · C, C++, Java, Go, Rust</dd>
         <dt>Network</dt><dd>Plug and play on any LAN or hotspot, end-to-end encrypted</dd>
         <dt>Install</dt><dd>Installer for teachers · exams are one portable file</dd>
@@ -196,10 +196,10 @@ footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
     </div>
     <div class="feature">
       <div>
-        <h3>File uploads, for open exams</h3>
-        <p>Students attach a report or project; you pick the file types. It travels inside the encrypted submission and you save it from Results. Only on exams without lockdown, because a locked exam never opens a file window.</p>
+        <h3>Files with any question</h3>
+        <p>Attach images, packet captures, logs or code. Students open them inside the exam, even in lockdown: a Wireshark-style packet list with hex dump, images, text, and a hex view for anything else.</p>
       </div>
-      <figure><a class="shot" href="img/exam-upload.png"><img src="img/exam-upload.png" alt="A file upload question: allowed types, size limit and a Choose file button." loading="lazy" width="1920" height="1230"></a></figure>
+      <figure><a class="shot" href="img/exam-files.png"><img src="img/exam-files.png" alt="A packet capture opened inside the exam: packet list with protocols and a hex dump of an HTTP response." loading="lazy" width="1920" height="1230"></a></figure>
     </div>
   </div>
   <div class="wrap" style="margin-top:48px">
@@ -241,7 +241,7 @@ footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
   <div class="wrap">
     <div class="eyebrow">Teacher guides</div>
     <h2>Twenty seconds per language on writing a good code question.</h2>
-    <p style="color:var(--muted);max-width:64ch">The same guides play inside the Studio next to the question editor.</p>
+    <p style="color:var(--muted);max-width:64ch">In the Studio, <b>How to write a good question</b> walks you through the real editor, one slide per field, with the field circled in red. The animations below show the same ideas.</p>
     <div class="guides">
       <figure><a class="shot" id="guide-link" href="guides/py.gif"><img id="guide-img" src="guides/py.gif" alt="Animated guide: writing a Python question in HDJLabs Studio, step by step." loading="lazy" width="1000" height="632"></a></figure>
       <div>
@@ -265,7 +265,7 @@ footer .wrap{display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
       <div>
         <div class="eyebrow">Get started</div>
         <h2>Install the Studio. Export an exam. Done.</h2>
-        <p style="color:var(--muted);margin:0">The installer needs no admin rights. Exams you export are single portable files — students just run them. If SmartScreen warns on first run, choose <b>More info → Run anyway</b>, or set up the lab once so it never does: see <a href="https://github.com/op-h/HDJLabs/blob/main/docs/code-signing.md">code signing and SmartScreen</a>. See the <a href="https://github.com/op-h/HDJLabs/blob/main/docs/classroom-network.md">classroom guide</a> and the <a href="https://github.com/op-h/HDJLabs/blob/main/docs/security-review.md">security review</a>.</p>
+        <p style="color:var(--muted);margin:0">The installer needs no admin rights. Exams you export are single portable files — students just run them. If SmartScreen warns on first run, choose <b>More info → Run anyway</b>, or set up the lab once so it never does: see <a href="https://github.com/op-h/HDJLabs/blob/main/docs/code-signing.md">code signing and SmartScreen</a>. Free code signing provided by <a href="https://signpath.io">SignPath.io</a>, certificate by <a href="https://signpath.org">SignPath Foundation</a> (see the <a href="https://github.com/op-h/HDJLabs#code-signing-policy">code signing policy</a>). See the <a href="https://github.com/op-h/HDJLabs/blob/main/docs/classroom-network.md">classroom guide</a> and the <a href="https://github.com/op-h/HDJLabs/blob/main/docs/security-review.md">security review</a>.</p>
       </div>
       <div class="cta">
         <a class="btn primary" href="https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs-Setup.exe">Download installer</a>

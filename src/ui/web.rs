@@ -78,6 +78,9 @@ impl WebPreview {
         let Some((rect, html)) = self.pending.take() else {
             if self.visible {
                 if let Some(v) = &self.view {
+                    // A clicked WebView keeps the keyboard even when hidden: hand it back, or the
+                    // next text box (a short answer, say) silently ignores typing.
+                    let _ = v.focus_parent();
                     let _ = v.set_visible(false);
                     // Some WebView2 builds (seen on Windows 8.1) ignore hiding and keep an invisible
                     // window that swallows clicks; with no size it can't cover anything.
@@ -128,6 +131,11 @@ impl WebPreview {
         }
         let v = self.view.as_ref().unwrap();
         let _ = v.set_bounds(bounds);
+        // Clicking anywhere in the exam outside the preview gives the keyboard back to the exam.
+        let pressed_outside = ctx.input(|i| i.pointer.any_pressed() && i.pointer.interact_pos().is_some_and(|p| !rect.contains(p)));
+        if pressed_outside {
+            let _ = v.focus_parent();
+        }
         if !self.visible {
             let _ = v.set_visible(true);
             self.visible = true;

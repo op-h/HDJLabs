@@ -11,7 +11,7 @@ use crate::crypto::{self, SessionCipher};
 use crate::model::*;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::{BufRead, BufReader, Read, Seek, Write};
 use std::net::{IpAddr, Ipv4Addr, SocketAddr, TcpListener, TcpStream, UdpSocket};
 use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -83,6 +83,8 @@ pub enum S2C {
     ForceSubmit,
     /// Delete the exam file from this PC when the exam closes.
     RemoveExam,
+    /// Submit (if still working) and close the exam on this PC.
+    CloseExam,
     /// The teacher finished grading: final per-question results and score.
     Graded { results: Vec<QuestionResult>, score: f32 },
     SubmitAck,
@@ -429,7 +431,7 @@ fn serve_student(
         s.last_seen = Instant::now();
         st.outboxes.insert(attempt_id.clone(), tx.clone());
         regrade = st.graded.get(&attempt_id).cloned();
-        st.log.push(format!("{name} ({student_id}) connected from {}", addr.ip()));
+        st.log.push(format!("{} ({student_id}) connected from {}", crate::ui::rtl::line(&name), addr.ip()));
         st.dirty = true;
     }
     repaint();
@@ -520,19 +522,67 @@ fn html_escape(s: &str) -> String {
     s.replace('&', "&amp;").replace('<', "&lt;").replace('>', "&gt;").replace('"', "&quot;")
 }
 
+/// Facts about the exam file shown on the download page.
+struct PageInfo {
+    body: String,
+    file_name: String,
+}
+
+fn percent_encode(s: &str) -> String {
+    s.bytes().map(|b| if b.is_ascii_alphanumeric() || b"-_.".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }).collect()
+}
+
+fn page_info(exe: &std::path::Path, title: &str) -> PageInfo {
+    let size = std::fs::metadata(exe).map(|m| m.len()).unwrap_or(0);
+    let header = crate::payload::read_file(exe).ok().flatten().map(|p| p.header);
+    let file_name = format!("{}.exe", sanitize_file_name(title));
+    let sha = std::fs::read(exe).map(|b| {
+        use sha2::Digest;
+        sha2::Sha256::digest(&b).iter().map(|x| format!("{x:02x}")).collect::<String>()
+    }).unwrap_or_default();
+    let mut facts = Vec::new();
+    if let Some(h) = &header {
+        if !h.author.trim().is_empty() {
+            facts.push(("Teacher", html_escape(&h.author)));
+        }
+        facts.push(("Duration", format!("{} min", h.duration_min)));
+        facts.push(("Questions", h.question_count.to_string()));
+        facts.push(("Points", format!("{}", (h.total_points * 100.0).round() / 100.0)));
+        facts.push(("Screen", if h.lockdown { "Locked until you submit".into() } else { "Normal window".into() }));
+    }
+    let facts_html: String = facts.iter().map(|(k, v)| format!("<tr><th>{k}</th><td>{v}</td></tr>")).collect();
+    let lock_note = if header.as_ref().is_some_and(|h| h.lockdown) {
+        "<p class=\"note\">The exam takes over the whole screen until you submit. Save and close other work before you open it.</p>"
+    } else {
+        ""
+    };
+    let body = DOWNLOAD_PAGE
+        .replace("{TITLE}", &html_escape(title))
+        .replace("{FILE}", &html_escape(&file_name))
+        .replace("{SIZE}", &format!("{:.1}", size as f64 / 1_048_576.0))
+        .replace("{FACTS}", &facts_html)
+        .replace("{LOCK}", lock_note)
+        .replace("{SHA}", &sha);
+    PageInfo { body, file_name }
+}
+
+const FAVICON: &[u8] = include_bytes!("../assets/hdjlabs.ico");
+
 fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>, state: Arc<Mutex<LiveState>>) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    // Built once: the checksum of a ~50 MB file is worth computing only one time.
+    let info = Arc::new(page_info(&exe, &title));
     while !stop.load(Ordering::Relaxed) {
         let Ok((mut s, peer)) = l.accept() else {
             std::thread::sleep(Duration::from_millis(100));
             continue;
         };
         let Some(slot) = Slot::take(&active, MAX_HTTP_CONNS) else {
-            let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+            let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 2\r\nConnection: close\r\n\r\n");
             continue;
         };
         let exe = exe.clone();
-        let title = title.clone();
+        let info = info.clone();
         let state = state.clone();
         std::thread::spawn(move || {
             let _slot = slot;
@@ -540,32 +590,73 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
             let _ = s.set_read_timeout(Some(Duration::from_secs(5)));
             let mut reader = BufReader::new(s.try_clone().unwrap());
             let mut line = String::new();
-            // Request line only; headers are irrelevant for two fixed routes.
             if reader.by_ref().take(4096).read_line(&mut line).is_err() {
                 return;
             }
-            let path = line.split_whitespace().nth(1).unwrap_or("/");
-            let file_name = format!("{}.exe", sanitize_file_name(&title));
+            // Headers: only Range matters (resuming a broken download). At most 64 lines / 8 KB.
+            let mut range_start: Option<u64> = None;
+            let mut budget = 8192u64;
+            for _ in 0..64 {
+                let mut h = String::new();
+                match reader.by_ref().take(budget).read_line(&mut h) {
+                    Ok(0) | Err(_) => break,
+                    Ok(n) => budget = budget.saturating_sub(n as u64),
+                }
+                let h = h.trim_end();
+                if h.is_empty() {
+                    break;
+                }
+                if let Some(v) = h.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("range")).map(|(_, v)| v.trim()) {
+                    range_start = v.strip_prefix("bytes=").and_then(|r| r.split('-').next()).and_then(|n| n.trim().parse().ok());
+                }
+            }
+            let mut parts = line.split_whitespace();
+            let method = parts.next().unwrap_or("");
+            let path = parts.next().unwrap_or("/");
+            let head = method == "HEAD";
+            if method != "GET" && !head {
+                let _ = s.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                return;
+            }
+            let common = "X-Content-Type-Options: nosniff\r\nCache-Control: no-store\r\nConnection: close\r\n";
             match path {
                 "/" | "/index.html" => {
-                    let size = std::fs::metadata(&exe).map(|m| m.len() / 1_048_576).unwrap_or(0);
-                    let body = DOWNLOAD_PAGE.replace("{TITLE}", &html_escape(&title)).replace("{SIZE}", &size.to_string()).replace("{FILE}", &html_escape(&file_name));
-                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nX-Content-Type-Options: nosniff\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'\r\nConnection: close\r\n\r\n{}", body.len(), body);
+                    let body = &info.body;
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: text/html; charset=utf-8\r\nContent-Length: {}\r\nContent-Security-Policy: default-src 'none'; style-src 'unsafe-inline'; img-src 'self'\r\n{common}\r\n", body.len());
+                    if !head {
+                        let _ = s.write_all(body.as_bytes());
+                    }
+                }
+                "/favicon.ico" => {
+                    let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: image/x-icon\r\nContent-Length: {}\r\n{common}\r\n", FAVICON.len());
+                    if !head {
+                        let _ = s.write_all(FAVICON);
+                    }
                 }
                 "/download" => match std::fs::File::open(&exe) {
                     Ok(mut f) => {
                         let len = f.metadata().map(|m| m.len()).unwrap_or(0);
-                        let _ = write!(s, "HTTP/1.1 200 OK\r\nContent-Type: application/vnd.microsoft.portable-executable\r\nContent-Length: {len}\r\nContent-Disposition: attachment; filename=\"{file_name}\"\r\nConnection: close\r\n\r\n");
+                        let from = range_start.filter(|r| *r < len).unwrap_or(0);
+                        let ascii: String = info.file_name.chars().map(|c| if c.is_ascii_alphanumeric() || " -_.".contains(c) { c } else { '_' }).collect();
+                        let disposition = format!("attachment; filename=\"{ascii}\"; filename*=UTF-8''{}", percent_encode(&info.file_name));
+                        let status = if from > 0 { format!("206 Partial Content\r\nContent-Range: bytes {from}-{}/{len}", len.saturating_sub(1)) } else { "200 OK".into() };
+                        let _ = write!(s, "HTTP/1.1 {status}\r\nContent-Type: application/vnd.microsoft.portable-executable\r\nContent-Length: {}\r\nAccept-Ranges: bytes\r\nContent-Disposition: {disposition}\r\n{common}\r\n", len - from);
+                        if head {
+                            return;
+                        }
+                        if from > 0 && f.seek(std::io::SeekFrom::Start(from)).is_err() {
+                            return;
+                        }
                         let idx = {
                             let mut st = state.lock().unwrap();
                             if st.downloads.len() >= 500 {
                                 st.downloads.remove(0);
                             }
-                            st.downloads.push(Download { ip: peer.ip().to_string(), sent: 0, total: len, started: Instant::now(), finished: None, failed: false });
+                            st.downloads.push(Download { ip: peer.ip().to_string(), sent: from, total: len, started: Instant::now(), finished: None, failed: false });
                             st.downloads.len() - 1
                         };
                         let mut buf = vec![0u8; 256 * 1024];
-                        let mut sent = 0u64;
+                        let mut sent = from;
                         let ok = loop {
                             match f.read(&mut buf) {
                                 Ok(0) => break true,
@@ -609,14 +700,53 @@ pub fn sanitize_file_name(s: &str) -> String {
     if t.is_empty() { "Exam".into() } else { t.chars().take(60).collect() }
 }
 
-const DOWNLOAD_PAGE: &str = r#"<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>{TITLE} · HDJLabs</title>
-<style>body{margin:0;min-height:100vh;display:grid;place-items:center;background:#0b0f17;color:#e6ebf5;font:16px/1.5 "Segoe UI",system-ui,sans-serif}
-.card{max-width:460px;margin:16px;padding:36px;border-radius:18px;background:#121826;border:1px solid #232c3f;text-align:center}
-.brand{font-weight:700;letter-spacing:.08em;color:#7aa2ff;font-size:13px}h1{margin:10px 0 6px;font-size:26px}p{color:#9aa6bd;margin:0 0 24px}
-a{display:inline-block;padding:14px 28px;border-radius:12px;background:#5b7cff;color:#fff;text-decoration:none;font-weight:600}
-small{display:block;margin-top:18px;color:#6b7690}</style></head><body><div class="card"><div class="brand">HDJLABS · CLASSROOM</div>
-<h1>{TITLE}</h1><p>Download the exam and wait for your teacher's password.</p><a href="/download">Download {FILE} ({SIZE} MB)</a>
-<small>If Windows SmartScreen appears, choose "More info" → "Run anyway".</small></div></body></html>"#;
+const DOWNLOAD_PAGE: &str = r#"<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="X-UA-Compatible" content="IE=edge"><title>{TITLE} · HDJLabs</title>
+<style>
+html,body{margin:0;padding:0;background:#0b0e0d;color:#dce3df;font-family:"Segoe UI",Tahoma,Arial,sans-serif;font-size:16px;line-height:1.5}
+.wrap{max-width:620px;margin:0 auto;padding:40px 18px}
+.top{margin-bottom:22px}
+.logo{display:inline-block;width:30px;height:30px;text-align:center;border:1px solid #445049;border-radius:6px;background:#111615;color:#a8e33a;font:700 15px/28px Consolas,monospace;vertical-align:middle}
+.brand{display:inline-block;vertical-align:middle;margin-left:10px;font:600 12px Consolas,monospace;letter-spacing:.14em;color:#86938d}
+.card{background:#111615;border:1px solid #2e3834;border-radius:8px;padding:28px}
+.eyebrow{font:600 11px Consolas,monospace;letter-spacing:.14em;color:#86938d;text-transform:uppercase;margin:0 0 6px}
+h1{margin:0 0 18px;font-size:28px;line-height:1.25;font-weight:600;color:#dce3df}
+table{border-collapse:collapse;width:100%;margin:0 0 22px}
+th{font:600 11px Consolas,monospace;letter-spacing:.1em;color:#86938d;text-transform:uppercase;text-align:left;padding:7px 12px 7px 0;width:120px;border-top:1px solid #1d2422}
+td{padding:7px 0;border-top:1px solid #1d2422}
+.btn{display:block;text-align:center;background:#a8e33a;color:#0b0e0d;font-weight:600;font-size:17px;text-decoration:none;border-radius:6px;padding:15px 18px}
+.btn:hover,.btn:focus{background:#c2f06c;outline:none}
+.file{margin:8px 0 0;text-align:center;color:#86938d;font-size:13px}
+.file a{color:#a8e33a}
+ol{margin:26px 0 0;padding:0;list-style:none;counter-reset:s}
+li{position:relative;padding:0 0 14px 40px;counter-increment:s}
+li:before{content:counter(s);position:absolute;left:0;top:1px;width:24px;height:24px;text-align:center;border:1px solid #445049;border-radius:4px;font:600 12px/24px Consolas,monospace;color:#a8e33a}
+li b{color:#dce3df}
+li span{color:#86938d}
+.note{margin:16px 0 0;padding:12px 14px;border:1px solid #5c4a23;background:#1a1610;border-radius:6px;color:#e5a84b;font-size:14px}
+.help{margin:16px 0 0;color:#86938d;font-size:14px}
+.sha{margin:22px 0 0;font:12px Consolas,monospace;color:#545f5a;word-break:break-all}
+.foot{margin-top:20px;font-size:12px;color:#6b7671}
+</style></head><body><div class="wrap">
+<div class="top"><span class="logo">H</span><span class="brand">HDJLABS &middot; CLASSROOM</span></div>
+<div class="card">
+<p class="eyebrow">Exam download</p>
+<h1 dir="auto">{TITLE}</h1>
+<table>{FACTS}<tr><th>File</th><td>{FILE} &middot; {SIZE} MB</td></tr></table>
+<a class="btn" href="/download">Download the exam</a>
+<p class="file">Button not working? <a href="/download">Direct link</a></p>
+<ol>
+<li><b>Download</b> <span>the file. It goes to your Downloads folder.</span></li>
+<li><b>Open it.</b> <span>Nothing is installed; the exam is the file itself.</span></li>
+<li><b>Sign in</b> <span>with your name and the password your teacher announces.</span></li>
+</ol>
+{LOCK}
+<p class="help">If Windows shows <b>"Windows protected your PC"</b>, choose <b>More info</b> and then <b>Run anyway</b>. If your antivirus blocks the file, tell your teacher.</p>
+<p class="sha">SHA-256 {SHA}</p>
+</div>
+<p class="foot">Served by your teacher's HDJLabs Studio over the classroom network. No internet needed.</p>
+</div></body></html>"#;
 
 // ───────────────────────────── student side ─────────────────────────────
 

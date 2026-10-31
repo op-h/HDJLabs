@@ -14,6 +14,7 @@ mod lockdown;
 mod model;
 mod net;
 mod payload;
+mod report;
 mod runner;
 mod sigtag;
 mod storage;
@@ -41,6 +42,15 @@ fn main() {
         exam.settings.lockdown = mode != "0";
         exam.settings.block_remote_tools = mode == "1";
         exam.settings.keep_answers_off_pcs = std::env::var_os("HDJLABS_DEV_HIDE_ANSWERS").is_some();
+        if let Ok(dir) = std::env::var("HDJLABS_DEV_ATTACH") {
+            // Attach every file in `dir` to every question (visual tests of the file viewer).
+            for f in std::fs::read_dir(dir).into_iter().flatten().flatten() {
+                let bytes = std::fs::read(f.path()).unwrap_or_default();
+                for q in &mut exam.questions {
+                    q.attachments.push(model::Attachment { name: f.file_name().to_string_lossy().into_owned(), size: bytes.len() as u64, data: crypto::b64(&bytes) });
+                }
+            }
+        }
         if std::env::var_os("HDJLABS_DEV_NO_EXPECTED").is_some() {
             // A teacher who left "Compare the printed output" without saying what to expect.
             for q in &mut exam.questions {
@@ -163,6 +173,12 @@ fn main() {
         let project = args.get(1).map(std::path::PathBuf::from).filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("hdjx")) && p.is_file());
         std::process::exit(ui::studio::run(project));
     };
+
+    // Debug screenshots never lock the PC they run on: the exam opens windowed.
+    #[cfg(debug_assertions)]
+    if std::env::var_os("HDJLABS_SHOT_OUT").is_some() {
+        std::process::exit(ui::player::run(pkg, Mode::Windowed));
+    }
 
     let code = match flag {
         // Exam UI launched by the lockdown host. If it is not really on our private desktop

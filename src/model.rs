@@ -203,11 +203,33 @@ pub struct Question {
     pub prompt: String,
     pub points: f32,
     pub kind: Kind,
+    /// Files the teacher gives with the question (an image, a packet capture, a log…).
+    #[serde(default)]
+    pub attachments: Vec<Attachment>,
 }
 
 impl Question {
     pub fn new(id: u32, kind: Kind) -> Self {
-        Self { id, prompt: String::new(), points: 1.0, kind }
+        Self { id, prompt: String::new(), points: 1.0, kind, attachments: Vec::new() }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Attachment {
+    pub name: String,
+    pub size: u64,
+    /// File contents, base64.
+    pub data: String,
+}
+
+/// Largest single attachment, and all attachments in one exam together (they ship inside the
+/// encrypted exam file that every student downloads).
+pub const MAX_ATTACHMENT_MB: f32 = 10.0;
+pub const MAX_ATTACHMENTS_TOTAL_MB: f32 = 25.0;
+
+impl Exam {
+    pub fn attachments_size(&self) -> u64 {
+        self.questions.iter().flat_map(|q| &q.attachments).map(|a| a.size).sum()
     }
 }
 
@@ -234,6 +256,10 @@ pub struct Settings {
     /// Ship the exam without correct answers or hidden tests; the teacher's Studio grades.
     #[serde(default)]
     pub keep_answers_off_pcs: bool,
+    /// Students can't close the exam themselves: the teacher closes it from the Live classroom,
+    /// or types the proctor password on the student's PC.
+    #[serde(default)]
+    pub teacher_closes: bool,
 }
 
 impl Default for Settings {
@@ -253,6 +279,7 @@ impl Default for Settings {
             remove_after_submit: false,
             hold_scores: false,
             keep_answers_off_pcs: false,
+            teacher_closes: false,
         }
     }
 }
@@ -335,6 +362,8 @@ impl Exam {
         }
         if self.settings.lockdown && self.settings.exit_password.trim().len() < 4 {
             out.push("Lockdown exams need a proctor exit password (4+ characters).".into());
+        } else if self.settings.teacher_closes && self.settings.exit_password.trim().len() < 4 {
+            out.push("\"Only the teacher can close the exam\" needs a proctor exit password (4+ characters).".into());
         }
         for (i, q) in self.questions.iter().enumerate() {
             let n = i + 1;
@@ -354,6 +383,9 @@ impl Exam {
                     if accepted.iter().all(|a| a.trim().is_empty()) {
                         out.push(format!("Question {n} has no accepted answer."));
                     }
+                }
+                _ if self.attachments_size() as f32 / 1_048_576.0 > MAX_ATTACHMENTS_TOTAL_MB && n == 1 => {
+                    out.push(format!("Attached files add up to more than {MAX_ATTACHMENTS_TOTAL_MB} MB; students download all of them with the exam."));
                 }
                 Kind::Upload { .. } if self.settings.lockdown => {
                     out.push(format!("Question {n} is a file upload: turn off lockdown in Settings (a locked exam never opens a file window)."));

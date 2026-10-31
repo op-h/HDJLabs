@@ -225,12 +225,14 @@ mod tests {
         e.settings.exam_password = "letmein".into();
         e.settings.exit_password = "proctor".into();
         e.questions.push(Question {
+            attachments: vec![],
             id: 1,
             prompt: "2+2?".into(),
             points: 2.0,
             kind: Kind::Choice { options: vec!["3".into(), "4".into()], correct: vec![1], multiple: false },
         });
         e.questions.push(Question {
+            attachments: vec![],
             id: 2,
             prompt: "code".into(),
             points: 5.0,

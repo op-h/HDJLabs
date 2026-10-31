@@ -1,6 +1,6 @@
 # HDJLabs security review
 
-Scope: HDJLabs 1.3.0 — the Studio, the exported exam `.exe`, the LAN protocol and the code
+Scope: HDJLabs 1.0.0-beta — the Studio, the exported exam `.exe`, the LAN protocol and the code
 runner. Review date: 2026-10-30. Tested on Windows 11 (build 26300), and across a VMware LAN with student
 PCs on Windows 7 SP1 and Windows 8.1 (no GPU driver), using the debug and release builds.
 
@@ -94,6 +94,11 @@ Automated tests live in the source tree and run in CI (`cargo test`, 19 tests).
 | 40 | Code question with no expected output (left in "compare output" mode) | Unit test + capture | Treated as teacher-graded: the student waits for the teacher's score instead of seeing 0 for it |
 | 41 | SmartScreen and the intranet zone | Live test (Windows 8.1) | The same exam shows SmartScreen when marked as an Internet download and opens directly when marked Intranet; `lab-trust-teacher.ps1` moves the teacher's address to Intranet without admin rights |
 | 42 | Arabic and mixed text editing | Scripted keyboard input + captures | Joined letters, lam-alef ligature, right-aligned RTL lines, correct order for English inside Arabic, caret, arrows, selection, wrapping and Enter in multi-line fields |
+| 43 | Teacher's files opened in a locked exam | Code review + captures | Everything opens inside the exam (images, text, packet list, hex); nothing is handed to another program or written to disk while locked |
+| 44 | Malformed packet captures | Unit test + bounds-checked parser | Truncated or bogus records stop parsing instead of reading past the data; at most 50,000 packets |
+| 45 | Download page requests | curl | `HEAD`, resumable `Range` downloads (206), `405` for other methods, headers capped at 64 lines / 8 KB, `no-store`, `nosniff`, a strict CSP; works in Internet Explorer 11 on Windows 7 |
+| 46 | Closing the exam | Code review + captures | "Only I can close the exam" hides every student close control; the proctor password is checked with Argon2id; the teacher's remote close submits first and waits for the result to arrive |
+| 47 | Keyboard stuck in the HTML preview | Code review | A clicked WebView kept the keyboard after it was hidden, so the next text box ignored typing; focus now returns to the exam when the preview hides or the student clicks elsewhere |
 
 ## Findings fixed during the review
 

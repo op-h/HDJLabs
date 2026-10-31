@@ -105,6 +105,8 @@ pub struct Player {
     confirm_submit: bool,
     proctor: Option<(String, Option<String>)>,
     teacher_msg: Option<String>,
+    viewer_bytes: Option<((u32, usize), Vec<u8>)>,
+    viewer_state: crate::ui::viewer::ViewerState,
     upload_error: Option<String>,
     grading: Option<Receiver<Submission>>,
     saved_paths: Vec<std::path::PathBuf>,
@@ -119,6 +121,11 @@ pub struct Player {
     web: crate::ui::web::WebPreview,
     /// Teacher asked to delete the exam file from this PC (done when the exam closes).
     remove_requested: bool,
+    /// The teacher closed the exam from the Live classroom (when it was asked).
+    close_requested: Option<Instant>,
+    /// Proctor password typed on the finished screen of a teacher-closed exam.
+    close_pw: String,
+    close_err: bool,
     close_countdown: Option<Instant>,
     finalized: bool,
     #[cfg(debug_assertions)]
@@ -156,6 +163,8 @@ impl Player {
             confirm_submit: false,
             proctor: None,
             teacher_msg: None,
+            viewer_bytes: None,
+            viewer_state: Default::default(),
             upload_error: None,
             grading: None,
             saved_paths: vec![],
@@ -176,6 +185,9 @@ impl Player {
             },
             remove_requested: false,
             close_countdown: None,
+            close_requested: None,
+            close_pw: String::new(),
+            close_err: false,
             finalized: false,
             #[cfg(debug_assertions)]
             selftest_started: Instant::now(),
@@ -341,14 +353,14 @@ impl Player {
         let script = std::env::var("HDJLABS_SHOT_SCRIPT").unwrap_or_default();
         if script.is_empty() || script == "welcome" {
             if self.name.is_empty() {
-                self.name = "Sara Ali".into();
+                self.name = std::env::var("HDJLABS_SHOT_NAME").unwrap_or_else(|_| "Sara Ali".into());
                 self.sid = "S-104".into();
             }
             return;
         }
         match self.screen {
             Screen::Welcome if self.unlocking.is_none() && self.exam.is_none() => {
-                self.name = "Sara Ali".into();
+                self.name = std::env::var("HDJLABS_SHOT_NAME").unwrap_or_else(|_| "Sara Ali".into());
                 self.sid = std::env::var("HDJLABS_SHOT_SID").unwrap_or_else(|_| "S-104".into());
                 self.password = "start".into();
                 self.begin_unlock();
@@ -498,6 +510,15 @@ ORDER BY grade DESC;
                             storage::attempt_save(&exam.id, &self.key, at);
                         }
                         self.dirty = true;
+                    }
+                }
+                S2C::CloseExam => {
+                    if self.close_requested.is_none() {
+                        self.close_requested = Some(Instant::now());
+                        self.lan.event("Teacher closed the exam");
+                        if matches!(self.screen, Screen::Exam) {
+                            self.submit(true);
+                        }
                     }
                 }
                 S2C::RemoveExam => {
@@ -665,7 +686,7 @@ impl crate::ui::Root for Player {
         });
 
         self.modals(ctx);
-        if self.confirm_submit || self.proctor.is_some() || self.teacher_msg.is_some() {
+        if self.confirm_submit || self.proctor.is_some() || self.teacher_msg.is_some() || ctx.data(|d| d.get_temp::<(u32, usize)>(egui::Id::new(VIEW_KEY))).is_some() {
             self.web.begin(); // dialogs must not sit under the native preview window
         }
         let title = self.window_title.clone();
@@ -923,16 +944,13 @@ impl Player {
                         self.confirm_submit = true;
                     }
                     ui.add_space(4.0);
-                    if self.locked() && theme::icon_button(ui, icon::LOCK, "Proctor (teacher only) — Ctrl+Shift+F12").clicked() {
-                        self.proctor = Some((String::new(), None));
-                    }
                     let light = theme::is_light();
                     if theme::icon_button(ui, if light { icon::MOON } else { icon::SUN }, "Switch theme").clicked() {
                         theme::set_light(ui.ctx(), !light);
                     }
                     ui.separator();
                     if let Some(at) = &self.at {
-                        ui.label(RichText::new(&at.name).color(p.text));
+                        ui.label(RichText::new(rtl::line(&at.name)).color(p.text));
                     }
                     ui.separator();
                     conn_status(ui, &self.lan.conn(), true);
@@ -1052,6 +1070,7 @@ impl Player {
                         question_header(ui, &q, idx);
                         ui.add_space(8.0);
                         rtl::label(ui, &q.prompt, egui::FontId::proportional(19.0), p.text);
+                        attachment_chips(ui, &q, self.locked());
                         ui.add_space(20.0);
                         self.answer_widget(ui, &q);
                     });
@@ -1216,6 +1235,7 @@ impl Player {
 
     fn code_question(&mut self, ui: &mut egui::Ui, q: &Question, spec: &CodeSpec, idx: usize) {
         let p = pal();
+        let locked = self.locked();
         let at = self.at.as_mut().unwrap();
         let mut source = match at.answers.get(&q.id) {
             Some(Answer::Code { source, .. }) => source.clone(),
@@ -1239,6 +1259,7 @@ impl Player {
                         question_header(ui, q, idx);
                         ui.add_space(4.0);
                         rtl::label(ui, &q.prompt, egui::FontId::proportional(16.0), p.text);
+                        attachment_chips(ui, q, locked);
                         if spec.lang == Lang::Sql && !spec.setup.trim().is_empty() {
                             ui.add_space(12.0);
                             ui.label(theme::eyebrow("Database"));
@@ -1540,22 +1561,94 @@ impl Player {
                         ui.add(egui::Label::new(theme::muted(format!("A copy was saved to {}", path.parent().map(|d| d.display().to_string()).unwrap_or_default())).size(12.5)).wrap());
                     }
                     ui.add_space(10.0);
+                    let teacher_closes = exam.as_ref().is_some_and(|e| e.settings.teacher_closes);
+                    let mut close = false;
                     ui.vertical_centered(|ui| {
-                        if theme::primary(ui, &format!("{}  Close exam", icon::CHECK)).clicked() {
-                            if let (Some(at), Some(exam)) = (&self.at, &self.exam) {
-                                storage::attempt_save(&exam.id, &self.key, at);
+                        if !teacher_closes {
+                            close = theme::primary(ui, &format!("{}  Close exam", icon::CHECK)).clicked();
+                            return;
+                        }
+                        ui.label(theme::muted("Your teacher closes this exam. Leave the PC as it is."));
+                        ui.add_space(6.0);
+                        ui.horizontal(|ui| {
+                            let w = 220.0;
+                            ui.add_space(((ui.available_width() - w - 110.0) / 2.0).max(0.0));
+                            let r = ui.add(egui::TextEdit::singleline(&mut self.close_pw).password(true).hint_text("Proctor password").desired_width(w).margin(Margin::symmetric(10, 8)));
+                            let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                            if theme::ghost(ui, &format!("{}  Close", icon::LOCK)).clicked() || enter {
+                                if crate::crypto::verify_password(&self.close_pw, &self.pkg.header.exit_hash) {
+                                    close = true;
+                                } else {
+                                    self.close_err = true;
+                                    self.close_pw.clear();
+                                    self.violation("Wrong proctor password");
+                                }
                             }
-                            self.allow_close = true;
-                            self.finalize();
-                            ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                        });
+                        if self.close_err {
+                            ui.label(RichText::new("Incorrect password.").color(p.danger));
                         }
                     });
+                    // Closed by the teacher: wait (briefly) for the result to reach them first.
+                    if let Some(t) = self.close_requested {
+                        if acked || t.elapsed() > Duration::from_secs(8) {
+                            close = true;
+                        }
+                        ui.ctx().request_repaint_after(Duration::from_millis(300));
+                    }
+                    if close {
+                        if let (Some(at), Some(exam)) = (&self.at, &self.exam) {
+                            storage::attempt_save(&exam.id, &self.key, at);
+                        }
+                        self.allow_close = true;
+                        self.finalize();
+                        ui.ctx().send_viewport_cmd(egui::ViewportCommand::Close);
+                    }
                 });
             });
         });
     }
 
+    /// The attached file a student opened, full window.
+    fn attachment_viewer(&mut self, ctx: &egui::Context) {
+        let Some((qid, idx)) = ctx.data(|d| d.get_temp::<(u32, usize)>(egui::Id::new(VIEW_KEY))) else { return };
+        let Some(a) = self.exam.as_ref().and_then(|e| e.questions.iter().find(|q| q.id == qid)).and_then(|q| q.attachments.get(idx)).cloned() else {
+            ctx.data_mut(|d| d.remove::<(u32, usize)>(egui::Id::new(VIEW_KEY)));
+            return;
+        };
+        if self.viewer_bytes.as_ref().map(|(k, _)| *k) != Some((qid, idx)) {
+            self.viewer_bytes = Some(((qid, idx), crate::crypto::unb64(&a.data).unwrap_or_default()));
+            self.viewer_state = Default::default();
+        }
+        let p = pal();
+        let screen = ctx.content_rect();
+        let mut close = false;
+        egui::Modal::new(egui::Id::new("attachment-viewer")).frame(theme::card_frame().inner_margin(Margin::same(18))).show(ctx, |ui| {
+            ui.set_width(screen.width() * 0.86);
+            ui.set_height(screen.height() * 0.8);
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(icon::DOC).size(18.0).color(p.accent));
+                ui.label(theme::heading(&a.name, 18.0));
+                ui.label(theme::muted(crate::ui::viewer::fmt_size(a.size)).size(12.5));
+                ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                    if theme::ghost(ui, &format!("{}  Close", icon::CANCEL)).clicked() || ui.input(|i| i.key_pressed(Key::Escape)) {
+                        close = true;
+                    }
+                });
+            });
+            ui.separator();
+            if let Some((_, bytes)) = &self.viewer_bytes {
+                crate::ui::viewer::show(ui, &format!("{qid}-{idx}"), &a.name, bytes, &mut self.viewer_state);
+            }
+        });
+        if close {
+            ctx.data_mut(|d| d.remove::<(u32, usize)>(egui::Id::new(VIEW_KEY)));
+            self.viewer_bytes = None;
+        }
+    }
+
     fn modals(&mut self, ctx: &egui::Context) {
+        self.attachment_viewer(ctx);
         let p = pal();
         if self.confirm_submit {
             if let Some(at) = &self.at {
@@ -1683,6 +1776,65 @@ fn question_header(ui: &mut egui::Ui, q: &Question, idx: usize) {
             ui.label(theme::figure(format!("{} pt{}", theme::fmt_points(q.points), if (q.points - 1.0).abs() < 0.01 { "" } else { "s" }), 12.5, p.muted));
         });
     });
+}
+
+const VIEW_KEY: &str = "view-attachment";
+
+/// The teacher's files for a question: view inside the exam; open or save them when not locked.
+fn attachment_chips(ui: &mut egui::Ui, q: &Question, locked: bool) {
+    if q.attachments.is_empty() {
+        return;
+    }
+    let p = pal();
+    ui.add_space(12.0);
+    ui.label(theme::eyebrow("Files"));
+    // Fixed-width chips in rows that fit the column, so they never widen it.
+    let avail = ui.available_width().max(160.0);
+    let gap = 8.0;
+    let chip_w = 290.0_f32.min(avail);
+    let per_row = (((avail + gap) / (chip_w + gap)).floor() as usize).max(1);
+    for row in q.attachments.iter().enumerate().collect::<Vec<_>>().chunks(per_row) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = gap;
+            for (i, a) in row {
+                ui.allocate_ui_with_layout(egui::vec2(chip_w, 46.0), Layout::left_to_right(Align::Center), |ui| {
+                    egui::Frame::new().fill(p.surface).stroke(Stroke::new(1.0_f32, p.border)).corner_radius(CornerRadius::same(theme::R_CONTROL)).inner_margin(Margin::symmetric(10, 6)).show(ui, |ui| {
+                        ui.set_width(chip_w - 22.0);
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(icon::DOC).color(p.accent));
+                            let buttons = if locked { 64.0 } else { 128.0 };
+                            ui.allocate_ui_with_layout(egui::vec2((ui.available_width() - buttons).max(40.0), 32.0), Layout::top_down(Align::Min), |ui| {
+                                ui.spacing_mut().item_spacing.y = 0.0;
+                                ui.add(egui::Label::new(RichText::new(&a.name).font(theme::semibold(13.5))).truncate()).on_hover_text(&a.name);
+                                ui.label(theme::muted(fmt_size(a.size)).size(11.5));
+                            });
+                            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                                ui.spacing_mut().item_spacing.x = 2.0;
+                                if !locked {
+                                    if theme::icon_button(ui, icon::DOWNLOAD, "Save a copy").clicked() {
+                                        if let Some(out) = rfd::FileDialog::new().set_file_name(crate::net::sanitize_file_name(&a.name)).save_file() {
+                                            let _ = std::fs::write(out, crate::crypto::unb64(&a.data).unwrap_or_default());
+                                        }
+                                    }
+                                    if theme::icon_button(ui, icon::OPEN, "Open in its usual program").clicked() {
+                                        let dir = std::env::temp_dir().join("HDJLabs").join("files").join(q.id.to_string());
+                                        let _ = std::fs::create_dir_all(&dir);
+                                        let path = dir.join(crate::net::sanitize_file_name(&a.name));
+                                        if std::fs::write(&path, crate::crypto::unb64(&a.data).unwrap_or_default()).is_ok() {
+                                            let _ = std::process::Command::new("explorer").arg(&path).spawn();
+                                        }
+                                    }
+                                }
+                                if theme::ghost(ui, "View").clicked() {
+                                    ui.data_mut(|d| d.insert_temp(egui::Id::new(VIEW_KEY), (q.id, *i)));
+                                }
+                            });
+                        });
+                    });
+                });
+            }
+        });
+    }
 }
 
 fn fmt_size(bytes: u64) -> String {

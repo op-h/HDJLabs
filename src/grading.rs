@@ -147,7 +147,7 @@ mod tests {
     use super::*;
 
     fn q(kind: Kind) -> Question {
-        Question { id: 1, prompt: "p".into(), points: 4.0, kind }
+        Question { attachments: vec![], id: 1, prompt: "p".into(), points: 4.0, kind }
     }
 
     #[test]
@@ -179,9 +179,9 @@ mod tests {
     fn teacher_regrade_ignores_forged_score_and_answers_stay_home() {
         let mut exam = Exam::new();
         exam.questions = vec![
-            Question { id: 1, prompt: "p".into(), points: 2.0, kind: Kind::Choice { options: vec!["a".into(), "b".into()], correct: vec![1], multiple: false } },
-            Question { id: 2, prompt: "p".into(), points: 3.0, kind: Kind::Short { accepted: vec!["HDJ{ok_1}".into()], case_sensitive: true, show_format: true } },
-            Question { id: 3, prompt: "p".into(), points: 1.0, kind: Kind::TrueFalse { answer: true } },
+            Question { attachments: vec![], id: 1, prompt: "p".into(), points: 2.0, kind: Kind::Choice { options: vec!["a".into(), "b".into()], correct: vec![1], multiple: false } },
+            Question { attachments: vec![], id: 2, prompt: "p".into(), points: 3.0, kind: Kind::Short { accepted: vec!["HDJ{ok_1}".into()], case_sensitive: true, show_format: true } },
+            Question { attachments: vec![], id: 3, prompt: "p".into(), points: 1.0, kind: Kind::TrueFalse { answer: true } },
         ];
         let mut answers = std::collections::BTreeMap::new();
         answers.insert(1, Answer::Choice(vec![0]));
@@ -223,7 +223,7 @@ mod tests {
         assert_eq!(grade_static(&up, &Answer::Empty).status, Status::Unanswered);
         assert_eq!(grade_static(&up, &Answer::File { name: "r.pdf".into(), size: 10, data: "AAAA".into() }).status, Status::Review);
         let mut exam = Exam::new();
-        exam.questions = vec![Question { id: 1, prompt: "Upload".into(), points: 1.0, kind: Kind::Upload { extensions: vec![], max_mb: 1.0 } }];
+        exam.questions = vec![Question { attachments: vec![], id: 1, prompt: "Upload".into(), points: 1.0, kind: Kind::Upload { extensions: vec![], max_mb: 1.0 } }];
         exam.settings.lockdown = true;
         assert!(exam.validate().iter().any(|e| e.contains("lockdown")), "a locked exam must refuse uploads");
         exam.settings.lockdown = false;

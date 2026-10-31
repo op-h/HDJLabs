@@ -1,10 +1,11 @@
 pub mod editor;
-pub mod guides;
 pub mod player;
 pub mod rtl;
 pub mod studio;
 pub mod text_field;
 pub mod theme;
+pub mod tour;
+pub mod viewer;
 pub mod web;
 #[cfg(debug_assertions)]
 pub mod shot;

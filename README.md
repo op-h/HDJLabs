@@ -34,17 +34,17 @@ HDJLabs is one Windows program with two roles.
 
 | Teacher — **HDJLabs Studio** | Student — **the exported exam** |
 |---|---|
-| Write multiple-choice, multiple-answer, true/false, short-answer, **code** and **file upload** questions, in English or Arabic (typed and shown right-to-left with joined letters). | Runs from a single portable `.exe`. Nothing to install. |
+| Write multiple-choice, multiple-answer, true/false, short-answer and **code** questions, in English or Arabic (typed and shown right-to-left with joined letters). Attach **files** to any question: images, packet captures, logs. | Runs from a single portable `.exe`. Nothing to install. |
 | Export the exam as an encrypted `.exe` with an exam password and a proctor exit password. | Locks the PC until submission: other apps, the taskbar, shortcuts and touchpad gestures are blocked. |
 | Run a **Live classroom**: students download the exam from your PC; you see every download, every PC that has it open, and everyone who signed in. | A real code editor. **Python, JavaScript, SQL and HTML/CSS/JS are built in**; C, C++, Java, Go and Rust use compilers already on the PC. |
 | Watch progress and alerts, read each student's code as they write it, message them, add time, end the exam. | Answers autosave, encrypted, and survive crashes and power cuts. |
-| Every submission is re-graded on your PC, so a score can't be faked. Grade code and uploads with one click, **send the final score to the student's screen**, export CSV, then **remove the exam file from every PC**. | The result goes to the teacher over the LAN and is also saved as a sealed `.hdjr` file for USB collection. |
+| Every submission is re-graded on your PC, so a score can't be faked. **Grade code in the Live classroom** and send the final score to the student's screen. Results show the class analytics; export **Excel, PDF or CSV**. Close the exam on every PC, then **remove the exam file**. | The result goes to the teacher over the LAN and is also saved as a sealed `.hdjr` file for USB collection. |
 
 ## Download
 
 | | |
 |---|---|
-| **[HDJLabs-Setup.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs-Setup.exe)** | For teachers. No admin rights needed: per-user by default, or for all users with an admin. Adds Start-menu and desktop shortcuts, opens `.hdjx` projects, installs the teacher guides, and includes an uninstaller. |
+| **[HDJLabs-Setup.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs-Setup.exe)** | For teachers. No admin rights needed: per-user by default, or for all users with an admin. Adds Start-menu and desktop shortcuts, opens `.hdjx` projects, and includes an uninstaller. |
 | **[HDJLabs.exe](https://github.com/op-h/HDJLabs/releases/latest/download/HDJLabs.exe)** | The same Studio as one portable file. |
 
 Runs on **Windows 7 SP1, 8.1, 10 and 11 (64-bit)**. Nothing else is required: the C runtime is built in, and on PCs with no graphics driver (the "Microsoft Basic Display Adapter") HDJLabs switches to a CPU renderer by itself. If SmartScreen appears, choose **More info → Run anyway**. Exams exported from a signed Studio stay signed, releases are set up for free signing through SignPath Foundation, and one setting stops SmartScreen from checking exams downloaded from your PC in the lab: see **[code signing and SmartScreen](docs/code-signing.md)**. Before exam day, run one exported exam on a lab PC to check the lab's antivirus lets it start (see [preparing the lab](docs/classroom-network.md#prepare-the-lab-pcs)).
@@ -67,7 +67,7 @@ No network? Results are saved as `.hdjr` files in `Documents\HDJLabs Results` an
 |---|---|
 | ![SQL question](docs/screenshots/exam-sql.png) | **SQL.** You write the tables and rows; students see them beside the question and write queries. SQLite is built in. |
 | ![HTML question](docs/screenshots/exam-web.png) | **HTML / CSS / JavaScript.** Students build a page and watch it render as they type (Edge WebView2 on Windows 10/11). Navigation, pop-ups, printing and devtools are blocked. You grade the page in Results. |
-| ![File upload](docs/screenshots/exam-upload.png) | **File upload.** Students attach a report or project (you choose the file types, up to 3 MB). It travels inside the encrypted submission and you save it from Results. Only for exams with lockdown off: a locked exam never opens a file window. |
+| ![Files in a question](docs/screenshots/exam-files.png) | **Files for a question.** Attach images, packet captures (.pcap/.pcapng), logs or code to any question. Students open them inside the exam, even in lockdown: images, text, a Wireshark-style packet list with hex dump, and a hex view for anything else. With lockdown off they can also open or save them. |
 | ![Short answer](docs/screenshots/exam-short.png) | **Short answer, TryHackMe style.** Optionally show the answer's shape: letters and digits become `*`, symbols such as `_ { } ! @ #` stay visible, and each character the student types fills one slot (`HDJ{l0c` → `HDJ{l0c***_****!}`). |
 
 | Language | Engine |
@@ -84,9 +84,9 @@ Student code runs in a Windows Job Object: one process maximum (so it can't laun
 
 ## Teacher guides
 
-Every code language has a 20-second animated guide on writing a good question. It plays inside the Studio next to the editor, and you can watch them here: [Python](docs/guides/py.gif) · [JavaScript](docs/guides/js.gif) · [SQL](docs/guides/sql.gif) · [HTML/CSS/JS](docs/guides/html.gif) · [C](docs/guides/c.gif) · [C++](docs/guides/cpp.gif) · [Java](docs/guides/java.gif) · [Go](docs/guides/go.gif) · [Rust](docs/guides/rs.gif)
+At the bottom of every question, **How to write a good question** opens a step-by-step guide on the real editor: each slide circles the field it explains in red, scrolls to it, and gives an example for that language. The steps follow the question type and how it's checked (compare the output, several tests, or graded by you).
 
-<p align="center"><img src="docs/guides/sql.gif" width="80%" alt="Animated guide: writing an SQL question"></p>
+<p align="center"><img src="docs/screenshots/studio-guide.png" width="90%" alt="The question guide circling the test cases of a Python question"></p>
 
 ## Lockdown
 
@@ -113,6 +113,15 @@ Proctor access on a student PC: **Ctrl+Shift+F12** or the lock icon opens the pr
 ## Security
 
 Exams are encrypted with Argon2id + ChaCha20-Poly1305 under the exam password, so nobody can read the questions before you announce it, and any edit to the file breaks it. Your Studio re-grades every submission from the answers, so a score reported by a tampered exam doesn't count; tick *Keep the answer key off student PCs* and the exam file carries no correct answers or hidden tests at all. LAN traffic is end-to-end encrypted and only your Studio can decrypt it, so a student can't impersonate the teacher. Result files are sealed to your project's key. The threat model, limits and penetration-test results, including the multi-PC tests on Windows 7 and 8.1, are in **[docs/security-review.md](docs/security-review.md)**.
+
+## Code signing policy
+
+Releases are built from this repository by GitHub Actions and signed through [SignPath Foundation](https://signpath.org) once the project is accepted (free code signing for open source; certificate by SignPath Foundation). Until then, releases are unsigned.
+
+* **Committers and reviewers:** [OPH](https://github.com/op-h)
+* **Approver of each signed release:** [OPH](https://github.com/op-h)
+* Only builds made by the release workflow from a version tag are signed. Every signed release is listed on the [releases page](https://github.com/op-h/HDJLabs/releases) with SHA-256 checksums.
+* **Privacy:** HDJLabs sends nothing to the internet. The Studio and the exams talk only to each other over the classroom network (discovery on UDP 47810, the encrypted exam session on TCP 47811, the download page on TCP 47880). Results stay on the teacher's PC and the students' PCs.
 
 ## Build from source
 
@@ -141,7 +150,10 @@ src/
   interp.rs      built-in Python (RustPython), JavaScript (Boa) and SQL (SQLite)
   grading.rs     scoring, test cases
   storage.rs     projects, results, encrypted autosave
-  ui/            egui interface (OpenGL with CPU fallback): studio, exam, editor, web preview, guides
+  report.rs      Excel and PDF results reports
+  sigtag.rs      keeps exported exams validly signed
+  ui/            egui interface (OpenGL with CPU fallback): studio, exam, editor, web preview,
+                 file viewer (pcap), question guide, right-to-left text
 installer/       Inno Setup script
 site/            quiz.op-h.tech
 ```
