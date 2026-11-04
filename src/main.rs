@@ -7,9 +7,11 @@
 
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
+mod ai;
 mod crypto;
 mod grading;
 mod interp;
+mod link;
 mod lockdown;
 mod model;
 mod net;
@@ -19,6 +21,7 @@ mod runner;
 mod sigtag;
 mod storage;
 mod ui;
+mod update;
 
 use ui::player::Mode;
 
@@ -32,6 +35,81 @@ fn main() {
         std::process::exit(interp::exec_main(&args[2..]));
     }
     lockdown::recover_stale();
+
+    #[cfg(debug_assertions)]
+    if flag == Some("--dev-update") {
+        // Developer helper: check for an update; `install` also installs it.
+        let r = update::check();
+        println!("{r:?}");
+        if let (Ok(Some(n)), Some("install")) = (r, args.get(2).map(String::as_str)) {
+            println!("install: {:?}", update::install(&n, |_| {}));
+        }
+        return;
+    }
+
+    #[cfg(debug_assertions)]
+    if flag == Some("--dev-probe") {
+        println!("{:?}", ureq::get(&format!("{}/t/ping", args[2])).call().map(|r| r.into_string()));
+        return;
+    }
+
+    #[cfg(debug_assertions)]
+    if flag == Some("--dev-link") {
+        // Developer helper: a real internet link, and one student session through it
+        // (args: <exam.exe to share>).
+        let (secret, public) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let share = Some((std::path::PathBuf::from(&args[2]), "Link test".to_string()));
+        let server = net::LiveServer::start(exam_id.clone(), secret, "T".into(), net::DEFAULT_TCP_PORT, share, || {});
+        let link = link::PublicLink::start(net::HTTP_PORT);
+        let t = std::time::Instant::now();
+        let url = loop {
+            match link.state() {
+                link::LinkState::Ready(u) => break u,
+                link::LinkState::Failed(e) => return println!("LINK FAILED: {e}"),
+                s => eprintln!("{s:?}"),
+            }
+            std::thread::sleep(std::time::Duration::from_secs(1));
+        };
+        println!("LINK {url} after {:?}", t.elapsed());
+        let c = net::LanClient::start(exam_id.clone(), public.clone(), vec![], 1, std::sync::Arc::new(std::sync::Mutex::new(url.clone())));
+        c.hello("a1", "Remote Student", "R-1");
+        let sub = model::Submission { exam_id: exam_id.clone(), exam_title: "t".into(), attempt_id: "a1".into(), student_name: "Remote Student".into(), student_id: "R-1".into(), machine: "m".into(), started_at: 0, submitted_at: 1, question_order: vec![], answers: Default::default(), results: vec![], score: 0.0, max_score: 1.0, violations: vec![], forced: false };
+        let t = std::time::Instant::now();
+        c.submit(crypto::seal_for(&public, &exam_id, &serde_json::to_vec(&sub).unwrap()).unwrap());
+        while !c.submit_acked() && t.elapsed().as_secs() < 60 {
+            std::thread::sleep(std::time::Duration::from_millis(200));
+        }
+        println!("conn {:?}; submitted+acked: {} in {:?}", c.conn(), c.submit_acked(), t.elapsed());
+        server.state.lock().unwrap().broadcast(net::S2C::Message { text: "hello over the internet".into() });
+        println!("message back: {:?}", c.inbox.recv_timeout(std::time::Duration::from_secs(30)).ok().filter(|m| matches!(m, net::S2C::Message { .. })).is_some() || (0..20).any(|_| matches!(c.inbox.recv_timeout(std::time::Duration::from_secs(1)), Ok(net::S2C::Message { .. }))));
+        let page = ureq::get(&url).call().ok().and_then(|r| r.into_string().ok()).unwrap_or_default();
+        println!("download page via link: {}", page.contains("Link test"));
+        return;
+    }
+
+    #[cfg(debug_assertions)]
+    if flag == Some("--dev-ai") {
+        // Developer helper: build questions from files (args: <provider url> <model> <files...>;
+        // key in HDJLABS_AI_KEY; "anthropic" in the url picks the Messages API).
+        let mut cfg = ai::AiConfig::default();
+        cfg.enabled = true;
+        cfg.base_url = args[2].clone();
+        cfg.provider = if cfg.base_url.contains("anthropic") { ai::Provider::Anthropic } else { ai::Provider::Custom };
+        cfg.model = args[3].clone();
+        cfg.api_key = std::env::var("HDJLABS_AI_KEY").unwrap_or_default();
+        let sources: Vec<(String, String)> = args[4..].iter().map(|f| (f.clone(), ai::extract_text(std::path::Path::new(f)).unwrap_or_else(|e| panic!("{f}: {e}")))).collect();
+        for (n, t) in &sources {
+            eprintln!("{n}: {} chars: {:?}", t.len(), t.chars().take(160).collect::<String>());
+        }
+        let counts = ai::Counts { choice: 2, multi: 1, truefalse: 1, short: 1, code: 1 };
+        let req = ai::Request { sources, counts, code_lang: model::Lang::Python, difficulty: "medium".into(), language: "English".into(), notes: String::new() };
+        match ai::generate(&cfg, &req, |s| eprintln!("{s}")) {
+            Ok((qs, notes)) => println!("{}\nNOTES: {notes:?}", serde_json::to_string_pretty(&qs).unwrap()),
+            Err(e) => println!("ERROR: {e}"),
+        }
+        return;
+    }
 
     #[cfg(debug_assertions)]
     if flag == Some("--dev-export-sample") {
@@ -94,12 +172,17 @@ fn main() {
         let secs: u64 = args.get(3).and_then(|s| s.parse().ok()).unwrap_or(60);
         let server = net::LiveServer::start(project.exam.id.clone(), project.teacher_secret.clone(), "dev".into(), project.exam.settings.lan_port, project.last_export.clone().map(|p| (p, project.exam.title.clone())), || {});
         println!("serving errors={:?} http={:?}", server.errors, server.http_url);
+        if std::env::var_os("HDJLABS_DEV_OPEN").is_some() {
+            server.state.lock().unwrap().open_password = Some(project.exam.settings.exam_password.clone());
+        }
         let end = std::time::Instant::now() + std::time::Duration::from_secs(secs);
         let expect: usize = std::env::var("HDJLABS_DEV_EXPECT").ok().and_then(|v| v.parse().ok()).unwrap_or(usize::MAX);
         let remove = std::env::var("HDJLABS_DEV_REMOVE").is_ok();
         // Like the Studio: re-grade each submission here and send the student their score.
         let release = std::env::var("HDJLABS_DEV_RELEASE").is_ok();
         let mut released = std::collections::HashSet::new();
+        let mut restart_after = std::collections::HashMap::<String, std::time::Instant>::new();
+        let mut restarted = std::collections::HashSet::new();
         let (mut seen_log, mut last_summary, mut removed) = (0, String::new(), std::collections::HashSet::new());
         let mut events_seen = std::collections::HashMap::<String, usize>::new();
         while std::time::Instant::now() < end {
@@ -139,6 +222,15 @@ fn main() {
                         let score: f32 = results.iter().map(|r| r.earned).sum();
                         println!("re-graded {}: student PC said {}/{}, teacher says {score}/{} — sending", s.name, sub.score, sub.max_score, sub.max_score);
                         st.release_grade(&s.attempt_id, results, score);
+                    }
+                }
+            }
+            if std::env::var_os("HDJLABS_DEV_RESTART").is_some() {
+                for s in st.students.clone().iter().filter(|s| s.submission.is_some() && s.connected) {
+                    let t = restart_after.entry(s.attempt_id.clone()).or_insert_with(std::time::Instant::now);
+                    if t.elapsed() > std::time::Duration::from_secs(8) && restarted.insert(s.attempt_id.clone()) {
+                        st.send(&s.attempt_id, net::S2C::RestartExam);
+                        println!("sent RestartExam to {}", s.name);
                     }
                 }
             }

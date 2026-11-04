@@ -6,6 +6,11 @@
 //!   that is ChaCha20-Poly1305 under an ECDH key only the real teacher can derive, so a student
 //!   running a fake "teacher" cannot read or answer anyone's traffic.
 //! * Sharing: a tiny HTTP page on port 47880 hands out the exam .exe to browsers on the LAN.
+//! * Internet link: the same page also carries the session over plain HTTP requests
+//!   (`/t/...`), so it works through any web tunnel or public address. The bytes inside are the
+//!   same encrypted frames as on the LAN; the tunnel can't read or forge them.
+
+mod tunnel;
 
 use crate::crypto::{self, SessionCipher};
 use crate::model::*;
@@ -24,7 +29,10 @@ pub const DEFAULT_TCP_PORT: u16 = 47811;
 pub const HTTP_PORT: u16 = 47880;
 const MAX_FRAME: usize = 8 * 1024 * 1024;
 const MAX_STUDENT_CONNS: usize = 400;
-const MAX_HTTP_CONNS: usize = 48;
+/// Downloads plus two requests per student joined over the internet link.
+const MAX_HTTP_CONNS: usize = 320;
+/// Largest request body: one frame (a submission with uploads) plus framing.
+const MAX_HTTP_BODY: usize = MAX_FRAME + 64 * 1024;
 
 /// Caps concurrent connection threads so a flood from one machine can't exhaust the teacher PC.
 struct Slot(Arc<std::sync::atomic::AtomicUsize>);
@@ -72,6 +80,8 @@ pub enum C2S {
     Event { kind: String },
     Submit { sealed: crypto::SealedBox },
     Ping,
+    /// A signed-out exam asking whether the teacher lets students start without the password.
+    Lobby,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -85,10 +95,14 @@ pub enum S2C {
     RemoveExam,
     /// Submit (if still working) and close the exam on this PC.
     CloseExam,
+    /// The student has submitted and left: clear the PC for the next student (back to sign-in).
+    RestartExam,
     /// The teacher finished grading: final per-question results and score.
     Graded { results: Vec<QuestionResult>, score: f32 },
     SubmitAck,
     Pong,
+    /// Answer to `Lobby`: the exam password while the teacher lets students start without it.
+    Open { password: Option<String> },
 }
 
 fn write_frame(s: &mut impl Write, c: &mut SessionCipher, msg: &impl Serialize) -> std::io::Result<()> {
@@ -194,11 +208,14 @@ pub struct LiveState {
     pub downloads: Vec<Download>,
     /// Grades already sent, by attempt — sent again if that student reconnects.
     graded: HashMap<String, S2C>,
+    /// Set while the teacher lets students start without typing the exam password: signed-out
+    /// exams receive it over the encrypted session and unlock by themselves.
+    pub open_password: Option<String>,
 }
 
 impl Default for LiveState {
     fn default() -> Self {
-        LiveState { students: vec![], log: vec![], outboxes: HashMap::new(), dirty: false, seen_pcs: HashMap::new(), downloads: vec![], graded: HashMap::new() }
+        LiveState { students: vec![], log: vec![], outboxes: HashMap::new(), dirty: false, seen_pcs: HashMap::new(), downloads: vec![], graded: HashMap::new(), open_password: None }
     }
 }
 
@@ -332,7 +349,7 @@ impl LiveServer {
                     let _ = l.set_nonblocking(true);
                     let stop = stop.clone();
                     let st = state.clone();
-                    std::thread::spawn(move || serve_http(l, exe, title, stop, st));
+                    std::thread::spawn(move || serve_http(l, exe, title, stop, st, tcp_port));
                 }
                 Err(e) => errors.push(format!("Download page port {HTTP_PORT} unavailable: {e}")),
             }
@@ -395,6 +412,13 @@ fn serve_student(
         Err(e) if e.kind() == std::io::ErrorKind::UnexpectedEof => return Ok(()),
         Err(e) => return Err(e),
     };
+    if matches!(first, C2S::Lobby) {
+        let password = state.lock().unwrap().open_password.clone();
+        write_frame(&mut stream, &mut tx_c, &S2C::Welcome { teacher: String::new() })?;
+        write_frame(&mut stream, &mut tx_c, &S2C::Open { password })?;
+        let _ = stream.shutdown(std::net::Shutdown::Write);
+        return Ok(());
+    }
     let C2S::Hello { attempt_id, name, student_id, machine } = first else {
         return Err(std::io::Error::other("expected hello"));
     };
@@ -494,7 +518,7 @@ fn serve_student(
                     }
                 }
                 C2S::Ping => reply = Some(S2C::Pong),
-                C2S::Hello { .. } => {}
+                C2S::Hello { .. } | C2S::Lobby => {}
             }
         }
         st.dirty = true;
@@ -568,10 +592,14 @@ fn page_info(exe: &std::path::Path, title: &str) -> PageInfo {
 
 const FAVICON: &[u8] = include_bytes!("../assets/hdjlabs.ico");
 
-fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>, state: Arc<Mutex<LiveState>>) {
+fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>, state: Arc<Mutex<LiveState>>, tcp_port: u16) {
     let active = Arc::new(std::sync::atomic::AtomicUsize::new(0));
-    // Built once: the checksum of a ~50 MB file is worth computing only one time.
-    let info = Arc::new(page_info(&exe, &title));
+    // Built once per version of the file: its checksum is worth computing only one time. (The
+    // file changes when the teacher adds an internet link.)
+    let stamp = |p: &std::path::Path| std::fs::metadata(p).ok().map(|m| (m.len(), m.modified().ok()));
+    let mut info_at = stamp(&exe);
+    let mut info = Arc::new(page_info(&exe, &title));
+    let tunnels = Arc::new(tunnel::Tunnels::new(tcp_port, stop.clone()));
     while !stop.load(Ordering::Relaxed) {
         let Ok((mut s, peer)) = l.accept() else {
             std::thread::sleep(Duration::from_millis(100));
@@ -581,9 +609,14 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
             let _ = s.write_all(b"HTTP/1.1 503 Service Unavailable\r\nContent-Length: 0\r\nRetry-After: 2\r\nConnection: close\r\n\r\n");
             continue;
         };
+        if stamp(&exe) != info_at {
+            info_at = stamp(&exe);
+            info = Arc::new(page_info(&exe, &title));
+        }
         let exe = exe.clone();
         let info = info.clone();
         let state = state.clone();
+        let tunnels = tunnels.clone();
         std::thread::spawn(move || {
             let _slot = slot;
             let _ = s.set_nonblocking(false);
@@ -595,6 +628,7 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
             }
             // Headers: only Range matters (resuming a broken download). At most 64 lines / 8 KB.
             let mut range_start: Option<u64> = None;
+            let mut content_length = 0usize;
             let mut budget = 8192u64;
             for _ in 0..64 {
                 let mut h = String::new();
@@ -606,14 +640,33 @@ fn serve_http(l: TcpListener, exe: PathBuf, title: String, stop: Arc<AtomicBool>
                 if h.is_empty() {
                     break;
                 }
-                if let Some(v) = h.split_once(':').filter(|(k, _)| k.trim().eq_ignore_ascii_case("range")).map(|(_, v)| v.trim()) {
-                    range_start = v.strip_prefix("bytes=").and_then(|r| r.split('-').next()).and_then(|n| n.trim().parse().ok());
+                if let Some((k, v)) = h.split_once(':') {
+                    if k.trim().eq_ignore_ascii_case("range") {
+                        range_start = v.trim().strip_prefix("bytes=").and_then(|r| r.split('-').next()).and_then(|n| n.trim().parse().ok());
+                    } else if k.trim().eq_ignore_ascii_case("content-length") {
+                        content_length = v.trim().parse().unwrap_or(usize::MAX);
+                    }
                 }
             }
             let mut parts = line.split_whitespace();
             let method = parts.next().unwrap_or("");
             let path = parts.next().unwrap_or("/");
             let head = method == "HEAD";
+            if let Some(rest) = path.strip_prefix("/t/") {
+                if content_length > MAX_HTTP_BODY {
+                    let _ = s.write_all(b"HTTP/1.1 413 Payload Too Large\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
+                    return;
+                }
+                let mut body = vec![0u8; content_length];
+                let _ = s.set_read_timeout(Some(Duration::from_secs(30)));
+                if reader.read_exact(&mut body).is_err() {
+                    return;
+                }
+                let (code, reply) = tunnels.handle(method, rest, &body);
+                let _ = write!(s, "HTTP/1.1 {code}\r\nContent-Type: application/octet-stream\r\nContent-Length: {}\r\nCache-Control: no-store\r\nConnection: close\r\n\r\n", reply.len());
+                let _ = s.write_all(&reply);
+                return;
+            }
             if method != "GET" && !head {
                 let _ = s.write_all(b"HTTP/1.1 405 Method Not Allowed\r\nAllow: GET, HEAD\r\nContent-Length: 0\r\nConnection: close\r\n\r\n");
                 return;
@@ -769,6 +822,8 @@ struct Outbox {
     events: Vec<String>,
     submit: Option<crypto::SealedBox>,
     submit_acked: bool,
+    /// End the current session (a new student signs in under a new attempt).
+    restart: bool,
 }
 
 pub struct LanClient {
@@ -776,6 +831,9 @@ pub struct LanClient {
     pub conn: Arc<Mutex<Conn>>,
     pub inbox: Receiver<S2C>,
     stop: Arc<AtomicBool>,
+    /// Ask the teacher, while signed out, whether the exam may start without the password.
+    watch_open: Arc<AtomicBool>,
+    open: Arc<Mutex<Option<String>>>,
 }
 
 impl LanClient {
@@ -784,28 +842,42 @@ impl LanClient {
         let conn = Arc::new(Mutex::new(Conn::Searching));
         let stop = Arc::new(AtomicBool::new(false));
         let (tx, inbox) = mpsc::channel();
+        let watch_open = Arc::new(AtomicBool::new(false));
+        let open = Arc::new(Mutex::new(None));
         {
             let (outbox, conn, stop) = (outbox.clone(), conn.clone(), stop.clone());
+            let (watch_open, open) = (watch_open.clone(), open.clone());
             std::thread::spawn(move || {
                 let mut failures = 0u32;
                 while !stop.load(Ordering::Relaxed) {
                     let manual_addr = manual.lock().map(|m| m.trim().to_string()).unwrap_or_default();
                     let target = if !manual_addr.is_empty() {
-                        parse_addr(&manual_addr, default_port)
+                        parse_target(&manual_addr, default_port).filter(|t| !matches!(t, Target::Link(u) if !tunnel::reachable(u)))
                     } else {
-                        discover(&exam_id, Duration::from_millis(1500)).or_else(|| {
-                            hints.iter().filter_map(|h| parse_addr(h, default_port)).find(|a| TcpStream::connect_timeout(a, Duration::from_millis(400)).is_ok())
-                        })
+                        find_target(&exam_id, &hints, default_port)
                     };
                     match target {
-                        Some(addr) if outbox.lock().unwrap().hello.is_none() => {
+                        Some(t) if outbox.lock().unwrap().hello.is_none() => {
                             // Signed-out: just remember we found the teacher.
                             failures = 0;
-                            *conn.lock().unwrap() = Conn::Found(addr.ip().to_string());
+                            *conn.lock().unwrap() = Conn::Found(t.label());
+                            if watch_open.load(Ordering::Relaxed) {
+                                let got = match &t {
+                                    Target::Lan(addr) => Ok(*addr),
+                                    Target::Link(url) => tunnel::bridge(url),
+                                }
+                                .and_then(|addr| lobby(addr, &exam_id, &teacher_pub));
+                                *open.lock().unwrap() = got.unwrap_or(None);
+                            }
                         }
-                        Some(addr) => {
-                            *conn.lock().unwrap() = Conn::Connecting(addr.ip().to_string());
-                            if let Err(e) = client_session(addr, &exam_id, &teacher_pub, &outbox, &conn, &tx, &stop) {
+                        Some(t) => {
+                            *conn.lock().unwrap() = Conn::Connecting(t.label());
+                            let session = match &t {
+                                Target::Lan(addr) => Ok(*addr),
+                                Target::Link(url) => tunnel::bridge(url),
+                            }
+                            .and_then(|addr| client_session(addr, &t.label(), &exam_id, &teacher_pub, &outbox, &conn, &tx, &stop));
+                            if let Err(e) = session {
                                 failures += 1;
                                 let why = match e.kind() {
                                     std::io::ErrorKind::ConnectionRefused => "the teacher's session isn't running".to_string(),
@@ -816,6 +888,7 @@ impl LanClient {
                             }
                         }
                         None => {
+                            *open.lock().unwrap() = None;
                             failures += 1;
                             *conn.lock().unwrap() = if failures > 2 { Conn::Offline("no teacher found on this network".into()) } else { Conn::Searching };
                         }
@@ -824,7 +897,17 @@ impl LanClient {
                 }
             });
         }
-        LanClient { outbox, conn, inbox, stop }
+        LanClient { outbox, conn, inbox, stop, watch_open, open }
+    }
+
+    /// Starts asking the teacher whether this exam may start without the password.
+    pub fn watch_open(&self) {
+        self.watch_open.store(true, Ordering::Relaxed);
+    }
+
+    /// The exam password, while the teacher lets students start without typing it.
+    pub fn open_password(&self) -> Option<String> {
+        self.open.lock().unwrap().clone()
     }
 
     pub fn hello(&self, attempt_id: &str, name: &str, student_id: &str) {
@@ -858,6 +941,12 @@ impl LanClient {
         self.outbox.lock().unwrap().submit = Some(sealed);
     }
 
+    /// Forget the signed-in student and drop the session; the next `hello` starts a new one.
+    pub fn reset(&self) {
+        let mut o = self.outbox.lock().unwrap();
+        *o = Outbox { restart: true, ..Default::default() };
+    }
+
     pub fn submit_acked(&self) -> bool {
         self.outbox.lock().unwrap().submit_acked
     }
@@ -878,6 +967,70 @@ fn parse_addr(s: &str, default_port: u16) -> Option<SocketAddr> {
         return Some(a);
     }
     s.parse::<IpAddr>().ok().map(|ip| SocketAddr::new(ip, default_port))
+}
+
+/// Whether a teacher's HDJLabs session answers at this link.
+pub fn link_reachable(url: &str) -> bool {
+    match parse_target(url, DEFAULT_TCP_PORT) {
+        Some(Target::Link(base)) => tunnel::reachable(&base),
+        _ => false,
+    }
+}
+
+/// `link_reachable` for a link created just now (see `tunnel::reachable_fresh`).
+pub fn link_reachable_fresh(url: &str) -> bool {
+    match parse_target(url, DEFAULT_TCP_PORT) {
+        Some(Target::Link(base)) => tunnel::reachable_fresh(&base),
+        _ => false,
+    }
+}
+
+/// Where the teacher is: an address on this network, or an internet link.
+#[derive(Clone, Debug, PartialEq)]
+enum Target {
+    Lan(SocketAddr),
+    Link(String),
+}
+
+impl Target {
+    fn label(&self) -> String {
+        match self {
+            Target::Lan(a) => a.ip().to_string(),
+            Target::Link(u) => u.split("://").nth(1).unwrap_or(u).to_string(),
+        }
+    }
+}
+
+/// An IP, IP:port, or a link (`https://...`, or a bare host name, which means https).
+fn parse_target(s: &str, default_port: u16) -> Option<Target> {
+    let s = s.trim();
+    if let Some(a) = parse_addr(s, default_port) {
+        return Some(Target::Lan(a));
+    }
+    if s.is_empty() || s.contains(char::is_whitespace) {
+        return None;
+    }
+    let url = if s.starts_with("http://") || s.starts_with("https://") {
+        s.to_string()
+    } else if s.contains('.') {
+        format!("https://{s}")
+    } else {
+        return None;
+    };
+    // The download page's own address works too: keep scheme and host only.
+    let host_start = url.find("://").map(|i| i + 3).unwrap_or(0);
+    let host_end = url[host_start..].find('/').map(|j| host_start + j).unwrap_or(url.len());
+    (host_end > host_start).then(|| Target::Link(url[..host_end].to_string()))
+}
+
+/// The first reachable target: discovery, then the exported addresses, then links.
+fn find_target(exam_id: &str, hints: &[String], default_port: u16) -> Option<Target> {
+    if let Some(a) = discover(exam_id, Duration::from_millis(1500)) {
+        return Some(Target::Lan(a));
+    }
+    let targets: Vec<Target> = hints.iter().filter_map(|h| parse_target(h, default_port)).collect();
+    let lan = targets.iter().find(|t| matches!(t, Target::Lan(a) if TcpStream::connect_timeout(a, Duration::from_millis(400)).is_ok())).cloned();
+    lan.or_else(|| targets.into_iter().find(|t| matches!(t, Target::Link(u) if tunnel::reachable(u))))
 }
 
 pub fn discover(exam_id: &str, wait: Duration) -> Option<SocketAddr> {
@@ -909,8 +1062,32 @@ pub fn discover(exam_id: &str, wait: Duration) -> Option<SocketAddr> {
     None
 }
 
+/// One short encrypted exchange while signed out: is the exam open without a password?
+fn lobby(addr: SocketAddr, exam_id: &str, teacher_pub: &str) -> std::io::Result<Option<String>> {
+    let mut stream = TcpStream::connect_timeout(&addr, Duration::from_secs(3))?;
+    let _ = stream.set_nodelay(true);
+    stream.set_read_timeout(Some(Duration::from_secs(10)))?;
+    let (eph, mut tx_c, mut rx_c) = crypto::client_session(teacher_pub, exam_id).map_err(std::io::Error::other)?;
+    let mut hello = Vec::with_capacity(68);
+    hello.extend_from_slice(HELLO_TAG);
+    hello.extend_from_slice(exam_id.as_bytes());
+    hello.extend_from_slice(&eph);
+    stream.write_all(&hello)?;
+    write_frame(&mut stream, &mut tx_c, &C2S::Lobby)?;
+    // Both frames only decrypt if they come from the real teacher.
+    if !matches!(read_frame::<S2C>(&mut stream, &mut rx_c)?, S2C::Welcome { .. }) {
+        return Err(std::io::Error::other("unexpected server greeting"));
+    }
+    match read_frame::<S2C>(&mut stream, &mut rx_c)? {
+        S2C::Open { password } => Ok(password),
+        _ => Ok(None),
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
 fn client_session(
     addr: SocketAddr,
+    label: &str,
     exam_id: &str,
     teacher_pub: &str,
     outbox: &Arc<Mutex<Outbox>>,
@@ -935,7 +1112,7 @@ fn client_session(
     if !matches!(welcome, S2C::Welcome { .. }) {
         return Err(std::io::Error::other("unexpected server greeting"));
     }
-    *conn.lock().unwrap() = Conn::Connected(addr.ip().to_string());
+    *conn.lock().unwrap() = Conn::Connected(label.to_string());
 
     let mut rstream = stream.try_clone()?;
     rstream.set_read_timeout(None)?;
@@ -961,6 +1138,10 @@ fn client_session(
     while !stop.load(Ordering::Relaxed) && alive.load(Ordering::Relaxed) {
         let (status, answers, events, submit) = {
             let mut o = outbox.lock().unwrap();
+            if std::mem::take(&mut o.restart) {
+                let _ = stream.shutdown(std::net::Shutdown::Both);
+                return Ok(());
+            }
             let submit = if o.submit_acked { None } else { o.submit.clone() };
             (o.status.clone(), o.answers.take(), std::mem::take(&mut o.events), submit)
         };
@@ -1051,6 +1232,70 @@ mod tests {
             }
         }
         assert_eq!(got, Some((graded, 4.0)), "student should receive the teacher's grade");
+    }
+
+    /// The teacher lets students start without the password: signed-out exams receive it, and
+    /// lose it again when the teacher turns the option off.
+    #[test]
+    fn signed_out_exam_learns_the_open_password() {
+        let (secret, publ) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let port = 47919;
+        let server = LiveServer::start(exam_id.clone(), secret.clone(), "T".into(), port, None, || {});
+        let c = LanClient::start(exam_id.clone(), publ.clone(), vec![], port, Arc::new(Mutex::new(format!("127.0.0.1:{port}"))));
+        c.watch_open();
+        let wait = |want: Option<&str>| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(15) {
+                if c.open_password().as_deref() == want {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            false
+        };
+        std::thread::sleep(Duration::from_secs(3));
+        assert_eq!(c.open_password(), None, "off by default");
+        server.state.lock().unwrap().open_password = Some("letmein".into());
+        assert!(wait(Some("letmein")), "the exam receives the password");
+        server.state.lock().unwrap().open_password = None;
+        assert!(wait(None), "turned off again");
+        // A lobby check is not a student: nobody shows up as signed in.
+        assert!(server.state.lock().unwrap().students.is_empty());
+        // A client of another teacher's exam (wrong key) never learns it.
+        let (_, other_pub) = crypto::new_keypair();
+        server.state.lock().unwrap().open_password = Some("letmein".into());
+        let o = LanClient::start(exam_id.clone(), other_pub, vec![], port, Arc::new(Mutex::new(format!("127.0.0.1:{port}"))));
+        o.watch_open();
+        std::thread::sleep(Duration::from_secs(6));
+        assert_eq!(o.open_password(), None);
+    }
+
+    /// After a restart the same PC signs in a new student, who shows up as a separate attempt.
+    #[test]
+    fn restarted_pc_signs_in_the_next_student() {
+        let (secret, publ) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let port = 47915;
+        let server = LiveServer::start(exam_id.clone(), secret.clone(), "T".into(), port, None, || {});
+        let c = LanClient::start(exam_id.clone(), publ.clone(), vec![], port, Arc::new(Mutex::new(format!("127.0.0.1:{port}"))));
+        let wait_for = |what: &dyn Fn(&LiveState) -> bool| {
+            let t = Instant::now();
+            while t.elapsed() < Duration::from_secs(20) {
+                if what(&server.state.lock().unwrap()) {
+                    return true;
+                }
+                std::thread::sleep(Duration::from_millis(100));
+            }
+            false
+        };
+        c.hello("first", "Sara", "S-1");
+        assert!(wait_for(&|st| st.students.iter().any(|s| s.attempt_id == "first" && s.connected)));
+        c.reset();
+        assert!(wait_for(&|st| st.students.iter().any(|s| s.attempt_id == "first" && !s.connected)), "the old session ends");
+        c.hello("second", "Omar", "S-2");
+        assert!(wait_for(&|st| st.students.iter().any(|s| s.attempt_id == "second" && s.connected)), "the next student joins");
+        assert_eq!(server.state.lock().unwrap().students.len(), 2);
     }
 
     /// A full lab: 40 students connect, stream answers, submit, and all get their grade back.
@@ -1157,6 +1402,93 @@ mod tests {
         let st = server.state.lock().unwrap();
         let got = st.students[0].submission.as_ref().unwrap().answers.get(&1).cloned();
         assert_eq!(got, Some(file), "file arrives byte for byte");
+    }
+
+    /// Students joining through the internet link (HTTP requests only): a 3 MB upload, live
+    /// messages both ways, and a dozen students at once.
+    #[test]
+    fn internet_link_carries_whole_sessions() {
+        const N: usize = 12;
+        let (secret, publ) = crypto::new_keypair();
+        let exam_id = crypto::random_hex(16);
+        let (port, http) = (47916, 47917);
+        let server = LiveServer::start(exam_id.clone(), secret.clone(), "T".into(), port, None, || {});
+        let exe = std::env::temp_dir().join("hdj-link-test.exe");
+        std::fs::write(&exe, b"MZ").unwrap();
+        let l = TcpListener::bind(("127.0.0.1", http)).unwrap();
+        l.set_nonblocking(true).unwrap();
+        let (stop, st) = (server.stop.clone(), server.state.clone());
+        std::thread::spawn(move || serve_http(l, exe, "t".into(), stop, st, port));
+        let link = format!("http://127.0.0.1:{http}/");
+        assert_eq!(parse_target(&link, port), Some(Target::Link(format!("http://127.0.0.1:{http}"))));
+        assert_eq!(parse_target("abc-def.trycloudflare.com/x", port), Some(Target::Link("https://abc-def.trycloudflare.com".into())));
+
+        // "Start without the password" reaches a signed-out exam through the link too.
+        server.state.lock().unwrap().open_password = Some("letmein".into());
+        let lobby_client = LanClient::start(exam_id.clone(), publ.clone(), vec![], port, Arc::new(Mutex::new(link.clone())));
+        lobby_client.watch_open();
+        let t = Instant::now();
+        while lobby_client.open_password().is_none() && t.elapsed() < Duration::from_secs(20) {
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert_eq!(lobby_client.open_password().as_deref(), Some("letmein"));
+        drop(lobby_client);
+        server.state.lock().unwrap().open_password = None;
+
+        let bytes: Vec<u8> = (0..(MAX_UPLOAD_MB * 1024.0 * 1024.0) as usize).map(|i| (i * 31 % 251) as u8).collect();
+        let clients: Vec<(LanClient, Answer)> = (0..N)
+            .map(|i| {
+                // The link travels in the exam file (no LAN found), or the student types it.
+                let (hints, manual) = if i % 2 == 0 { (vec![link.clone()], String::new()) } else { (vec![], link.clone()) };
+                let c = LanClient::start(exam_id.clone(), publ.clone(), hints, port, Arc::new(Mutex::new(manual)));
+                let att = format!("net{i}");
+                c.hello(&att, &format!("Student {i}"), "S");
+                let file = Answer::File { name: "r.pdf".into(), size: 0, data: crypto::b64(if i == 0 { &bytes } else { b"small" }) };
+                let mut answers = std::collections::BTreeMap::new();
+                answers.insert(1u32, file.clone());
+                let sub = Submission {
+                    exam_id: exam_id.clone(),
+                    exam_title: "t".into(),
+                    attempt_id: att,
+                    student_name: format!("Student {i}"),
+                    student_id: "S".into(),
+                    machine: "m".into(),
+                    started_at: 0,
+                    submitted_at: 1,
+                    question_order: vec![1],
+                    answers,
+                    results: vec![],
+                    score: 0.0,
+                    max_score: 1.0,
+                    violations: vec![],
+                    forced: false,
+                };
+                c.submit(crypto::seal_for(&publ, &exam_id, &serde_json::to_vec(&sub).unwrap()).unwrap());
+                (c, file)
+            })
+            .collect();
+        let start = Instant::now();
+        while clients.iter().any(|(c, _)| !c.submit_acked()) && start.elapsed() < Duration::from_secs(60) {
+            std::thread::sleep(Duration::from_millis(200));
+        }
+        assert_eq!(clients.iter().filter(|(c, _)| c.submit_acked()).count(), N, "every submission acknowledged over the link");
+        {
+            let mut st = server.state.lock().unwrap();
+            for (i, (_, file)) in clients.iter().enumerate() {
+                let s = st.students.iter().find(|s| s.attempt_id == format!("net{i}")).unwrap();
+                assert_eq!(s.submission.as_ref().unwrap().answers.get(&1), Some(file), "uploads arrive intact");
+            }
+            st.broadcast(S2C::Message { text: "5 minutes left".into() });
+        }
+        for (i, (c, _)) in clients.iter().enumerate() {
+            let got = (0..100).find_map(|_| match c.inbox.recv_timeout(Duration::from_millis(300)) {
+                Ok(S2C::Message { text }) => Some(text),
+                _ => None,
+            });
+            assert_eq!(got.as_deref(), Some("5 minutes left"), "teacher messages come back down the link");
+            // Typed link: through the tunnel. Link in the file: the LAN wins when it's there.
+            assert!(matches!(c.conn(), Conn::Connected(ref l) if i % 2 == 0 || *l == format!("127.0.0.1:{http}")), "{:?}", c.conn());
+        }
     }
 
     #[test]

@@ -130,6 +130,7 @@ pub mod icon {
     pub const ZOOM_IN: &str = "\u{E310}";
     pub const ZOOM_OUT: &str = "\u{E30E}";
     pub const UNDO: &str = "\u{E038}";
+    pub const REFRESH: &str = "\u{E036}";
     pub const LIBRARY: &str = "\u{E758}";
 }
 

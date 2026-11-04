@@ -3,7 +3,7 @@
 ; Exported exams never need this — they are single portable .exe files.
 
 #ifndef AppVersion
-  #define AppVersion "1.0.0-beta"
+  #define AppVersion "1.0.1-beta"
 #endif
 #ifndef SourceExe
   #define SourceExe "..\target-win7\x86_64-win7-windows-msvc\release\HDJLabs.exe"
@@ -69,6 +69,14 @@ Root: HKA; Subkey: "Software\Classes\HDJLabs.Project\shell\open\command"; ValueT
 [Run]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall add rule name=""HDJLabs Studio"" dir=in action=allow program=""{app}\HDJLabs.exe"" enable=yes profile=any"; Flags: runhidden; Tasks: firewall
 Filename: "{app}\HDJLabs.exe"; Description: "Open HDJLabs Studio"; Flags: nowait postinstall skipifsilent
+; /RELAUNCH=1: open Studio again after a silent install.
+Filename: "{app}\HDJLabs.exe"; Flags: nowait; Check: Relaunch
 
 [UninstallRun]
 Filename: "{sys}\netsh.exe"; Parameters: "advfirewall firewall delete rule name=""HDJLabs Studio"" program=""{app}\HDJLabs.exe"""; Flags: runhidden; RunOnceId: "HDJLabsFirewall"
+
+[Code]
+function Relaunch: Boolean;
+begin
+  Result := ExpandConstant('{param:relaunch|0}') = '1';
+end;

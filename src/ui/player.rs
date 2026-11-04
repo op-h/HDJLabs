@@ -92,6 +92,10 @@ pub struct Player {
     password: String,
     error: Option<String>,
     unlocking: Option<Receiver<Result<(Exam, [u8; 32]), String>>>,
+    /// The running unlock uses the password the teacher sent (no password needed).
+    unlocking_open: bool,
+    /// The password the teacher sent didn't open this file (exported with another one).
+    open_failed: bool,
     failures: u32,
     cooldown_until: Option<Instant>,
     manual_addr: Arc<Mutex<String>>,
@@ -139,6 +143,9 @@ impl Player {
         let manual_addr = Arc::new(Mutex::new(String::new()));
         let h = &pkg.header;
         let lan = LanClient::start(h.exam_id.clone(), h.teacher_pub.clone(), h.teacher_hints.clone(), h.lan_port, manual_addr.clone());
+        if h.password_required {
+            lan.watch_open();
+        }
         let window_title = format!("HDJLabs Exam {}", &h.exam_id[..8.min(h.exam_id.len())]);
         Self {
             pkg,
@@ -150,6 +157,8 @@ impl Player {
             password: String::new(),
             error: None,
             unlocking: None,
+            unlocking_open: false,
+            open_failed: false,
             failures: 0,
             cooldown_until: None,
             manual_addr,
@@ -229,13 +238,23 @@ impl Player {
         }
         self.error = None;
         let pkg = self.pkg.clone();
-        let pw = self.password.clone();
+        let open = self.open_password();
+        self.unlocking_open = open.is_some();
+        let pw = open.unwrap_or_else(|| self.password.clone());
         let (tx, rx) = mpsc::channel();
         std::thread::spawn(move || {
             let r = pkg.unlock(&pw).map(|e| (e, pkg.attempt_key(&pw))).map_err(|_| "That password is not correct.".to_string());
             let _ = tx.send(r);
         });
         self.unlocking = Some(rx);
+    }
+
+    /// The exam password sent by the teacher, while they let students start without typing it.
+    fn open_password(&self) -> Option<String> {
+        if !self.pkg.header.password_required || self.open_failed {
+            return None;
+        }
+        self.lan.open_password()
     }
 
     fn on_unlocked(&mut self, exam: Exam, key: [u8; 32]) {
@@ -359,6 +378,13 @@ impl Player {
             return;
         }
         match self.screen {
+            Screen::Welcome if script == "open" => {
+                // Wait for the teacher's password, then start without typing one.
+                if self.unlocking.is_none() && self.exam.is_none() && self.open_password().is_some() {
+                    self.name = "Sara Ali".into();
+                    self.begin_unlock();
+                }
+            }
             Screen::Welcome if self.unlocking.is_none() && self.exam.is_none() => {
                 self.name = std::env::var("HDJLABS_SHOT_NAME").unwrap_or_else(|_| "Sara Ali".into());
                 self.sid = std::env::var("HDJLABS_SHOT_SID").unwrap_or_else(|_| "S-104".into());
@@ -464,6 +490,10 @@ ORDER BY grade DESC;
                 self.unlocking = None;
                 match r {
                     Ok((exam, key)) => self.on_unlocked(exam, key),
+                    Err(_) if self.unlocking_open => {
+                        self.open_failed = true;
+                        self.error = Some("Enter the exam password your teacher announces.".into());
+                    }
                     Err(e) => {
                         self.failures += 1;
                         self.lan.event("Wrong exam password");
@@ -510,6 +540,12 @@ ORDER BY grade DESC;
                             storage::attempt_save(&exam.id, &self.key, at);
                         }
                         self.dirty = true;
+                    }
+                }
+                S2C::RestartExam => {
+                    // Only once the student has submitted (or before anyone signed in).
+                    if matches!(self.screen, Screen::Finished | Screen::Welcome) {
+                        self.restart_for_next_student();
                     }
                 }
                 S2C::CloseExam => {
@@ -700,6 +736,43 @@ impl crate::ui::Root for Player {
 }
 
 impl Player {
+    /// Back to sign-in for the next student at this PC. The previous student's result was already
+    /// delivered and saved as a sealed file; the PC stays locked throughout.
+    fn restart_for_next_student(&mut self) {
+        if let Some(exam) = &self.exam {
+            storage::attempt_remove(&exam.id);
+        }
+        self.lan.reset();
+        self.at = None;
+        self.exam = None;
+        self.key = [0; 32];
+        self.name.clear();
+        self.sid.clear();
+        self.password.clear();
+        self.error = None;
+        self.code.clear();
+        self.confirm_submit = false;
+        self.proctor = None;
+        self.teacher_msg = None;
+        self.viewer_bytes = None;
+        self.viewer_state = Default::default();
+        self.upload_error = None;
+        self.grading = None;
+        self.saved_paths.clear();
+        self.close_requested = None;
+        self.close_pw.clear();
+        self.close_err = false;
+        self.close_countdown = None;
+        self.finalized = false;
+        self.web = if crate::ui::software_requested() {
+            crate::ui::web::WebPreview::disabled("Live preview isn't available on this PC (no graphics driver). Your page is still saved and submitted, and your teacher sees it.")
+        } else {
+            Default::default()
+        };
+        self.screen = Screen::Welcome;
+        self.dirty = false;
+    }
+
     /// Saves the attempt and, if requested, schedules the exam file's removal. Safe to call twice.
     fn finalize(&mut self) {
         if self.finalized {
@@ -875,7 +948,14 @@ impl Player {
                         theme::field_label(ui, "Student ID");
                         theme::text_field(ui, &mut self.sid, "Optional", f32::INFINITY);
                         let mut enter = false;
-                        if h.password_required {
+                        if h.password_required && self.open_password().is_some() {
+                            ui.add_space(4.0);
+                            ui.horizontal(|ui| {
+                                ui.label(RichText::new(icon::CHECK).size(15.0).color(p.success));
+                                ui.label(RichText::new("No password needed: your teacher opened the exam.").color(p.success));
+                            });
+                            enter = name_resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        } else if h.password_required {
                             theme::field_label(ui, "Exam password");
                             let r = ui.add(egui::TextEdit::singleline(&mut self.password).password(true).hint_text("Given by your teacher").desired_width(theme::fill(&ui, 10)).margin(Margin::symmetric(10, 8)));
                             enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
@@ -888,7 +968,7 @@ impl Player {
                             ui.label(RichText::new(format!("Too many attempts. Try again in {s} s.")).color(p.warning));
                         }
                         ui.add_space(8.0);
-                        let label = if busy { "Checking password…".to_string() } else { format!("Start exam   {}", icon::FORWARD) };
+                        let label = if busy { (if self.unlocking_open { "Opening the exam…" } else { "Checking password…" }).to_string() } else { format!("Start exam   {}", icon::FORWARD) };
                         let start = ui.add_enabled(
                             !busy && cooldown.is_none(),
                             egui::Button::new(RichText::new(label).font(theme::semibold(15.0)).color(p.on_accent)).fill(theme::accent_fill(ui)).corner_radius(CornerRadius::same(theme::R_CONTROL)).min_size(egui::vec2(ui.available_width(), 40.0)),
@@ -911,9 +991,9 @@ impl Player {
                         });
                         if self.show_net {
                             ui.separator();
-                            ui.label(theme::muted("Found automatically on the same network. If not, type the address shown on the teacher's Live screen.").size(12.5));
+                            ui.label(theme::muted("Found automatically on the same network. If not, type the address or internet link shown on the teacher's Live screen.").size(12.5));
                             ui.horizontal(|ui| {
-                                theme::text_field(ui, &mut self.manual_edit, "192.168.1.20", 200.0);
+                                theme::text_field(ui, &mut self.manual_edit, "192.168.1.20 or https://…", 260.0);
                                 if theme::ghost(ui, "Connect").clicked() {
                                     *self.manual_addr.lock().unwrap() = self.manual_edit.trim().to_string();
                                 }

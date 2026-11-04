@@ -83,10 +83,50 @@ is shown on hover and their result is still saved to a file.
 
 * The exam keeps working offline, and the result is saved to `Documents\HDJLabs Results` and next
   to the exam file. Collect the `.hdjr` files and use *Results → Import result files*.
-* On the student's sign-in screen, **Teacher address** lets them type the IP shown on your Live
-  screen. That bypasses broadcast discovery, which some managed switches block.
+* On the student's sign-in screen, **Teacher address** lets them type the IP (or internet link)
+  shown on your Live screen. That bypasses broadcast discovery, which some managed switches block.
 * Exams try the teacher's IP addresses from export time automatically, so exporting on the same
   network you'll teach on helps.
+
+## Students outside the classroom (internet link)
+
+In a running session, press **Create internet link**. HDJLabs fetches Cloudflare's free tunnel
+tool once (`cloudflared`, into `%LOCALAPPDATA%\HDJLabs`) and shows a public link such as
+`https://some-words.trycloudflare.com`. Send it to the students: they open it in a browser,
+download the exam and run it. The exam file is updated to include the link, so it connects back
+by itself; a student with an older copy can type the link under **Teacher address**.
+
+* Nothing is opened on your router and no account is needed. The link lasts until you stop it or
+  the session; a new session gets a new link.
+* The session inside the link is the same end-to-end encrypted protocol as on the LAN: Cloudflare
+  carries it but can't read or change answers. The exam itself still needs the exam password
+  (unless you let students start without it, below).
+* Already reachable from the internet (public IP with port 47880 forwarded, your own domain or
+  tunnel)? Use **Use my own address** instead.
+* Students on the classroom network still connect directly; the link is only used when the
+  teacher's PC isn't found nearby.
+
+## Starting without the password
+
+In a running session, tick **Students start without the password**. Every exam that is open on a
+signed-out PC and connected to your session gets the exam password from your Studio over the
+encrypted connection, so students only type their name and press **Start exam**. It's off by
+default and lasts for that session only; untick it to require the password again.
+
+* The password is encrypted on the network, and the exam only accepts it from your Studio. While
+  the option is on, anyone with the exam file who reaches your session can open it, just as a
+  student would; with it off, the file alone still reveals nothing.
+* Studio first checks that the exported exam opens with the current password. If you changed it
+  after exporting, export again.
+* A PC that isn't connected to your session (offline, wrong network) still asks for the password.
+
+## Running the exam in shifts
+
+When a student has submitted and left, the next one can sit at the same PC without restarting
+anything. In the Live classroom, click the student's name and press **Restart for next student**,
+or press **Restart finished PCs** to clear every PC whose student has submitted. The exam goes
+back to the sign-in screen, still locked, and the next student signs in with the same password.
+The previous student's result stays in your Results and in the sealed `.hdjr` backup on that PC.
 
 ## Cleaning up
 

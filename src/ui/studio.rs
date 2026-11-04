@@ -53,6 +53,8 @@ pub struct Studio {
     font: f32,
     firewall_ok: Option<bool>,
     live_started: Option<Instant>,
+    /// Checking that the exported exam opens with the password before students skip it.
+    open_check: Option<Receiver<Result<String, String>>>,
     confirm_remove_all: bool,
     confirm_close_all: bool,
     /// The "how to write a good question" guide, when open.
@@ -65,6 +67,15 @@ pub struct Studio {
     /// Debug guide recordings: fixed scroll position and caption.
     guide_scroll: Option<f32>,
     guide_caption: Option<String>,
+    /// "Create questions with AI" (off until a provider is set up).
+    ai: crate::ui::ai_panel::AiPanel,
+    /// Internet link for students outside this network (lives as long as the session).
+    link: Option<crate::link::PublicLink>,
+    /// The link already written into the exported exam file.
+    link_in_file: Option<String>,
+    link_custom: Option<String>,
+    /// Studio updates.
+    updates: crate::ui::update_panel::UpdatePanel,
 }
 
 impl Studio {
@@ -89,6 +100,7 @@ impl Studio {
             font: 14.0,
             firewall_ok: None,
             live_started: None,
+            open_check: None,
             confirm_remove_all: false,
             confirm_close_all: false,
             tour: None,
@@ -97,6 +109,11 @@ impl Studio {
             regrade_jobs: HashMap::new(),
             guide_scroll: None,
             guide_caption: None,
+            ai: crate::ui::ai_panel::AiPanel::new(),
+            link: None,
+            link_in_file: None,
+            link_custom: None,
+            updates: crate::ui::update_panel::UpdatePanel::new(),
         }
     }
 
@@ -180,8 +197,7 @@ impl Studio {
         let name = format!("{}.exe", net::sanitize_file_name(&self.project.exam.title));
         let dir = self.project.last_export.as_ref().and_then(|p| p.parent().map(|p| p.to_path_buf())).unwrap_or_else(storage::projects_dir);
         let Some(out) = rfd::FileDialog::new().add_filter("Windows app", &["exe"]).set_directory(dir).set_file_name(name).save_file() else { return };
-        let hints = net::local_ipv4().iter().map(|(ip, _)| ip.to_string()).collect();
-        match payload::export(&self.project.exam, &self.project.teacher_public, false, hints, &out) {
+        match payload::export(&self.project.exam, &self.project.teacher_public, false, self.export_hints(), &out) {
             Ok(()) => {
                 self.project.last_export = Some(out.clone());
                 self.dirty = true;
@@ -191,6 +207,36 @@ impl Studio {
                 self.toast(format!("Exported {}", out.display()), false);
             }
             Err(e) => self.toast(format!("Export failed: {e}"), true),
+        }
+    }
+
+    /// Where exported exams look for this PC: its LAN addresses, then the internet link if any.
+    fn export_hints(&self) -> Vec<String> {
+        let mut hints: Vec<String> = net::local_ipv4().iter().map(|(ip, _)| ip.to_string()).collect();
+        if let Some(crate::link::LinkState::Ready(u)) = self.link.as_ref().map(|l| l.state()) {
+            hints.push(u);
+        }
+        hints
+    }
+
+    /// Writes the new internet link into the shared exam file, so students who download it
+    /// through the link connect back the same way.
+    fn tick_link(&mut self) {
+        if self.live.is_none() {
+            self.link = None;
+            self.link_in_file = None;
+            return;
+        }
+        let Some(crate::link::LinkState::Ready(url)) = self.link.as_ref().map(|l| l.state()) else { return };
+        if self.link_in_file.as_ref() == Some(&url) {
+            return;
+        }
+        self.link_in_file = Some(url);
+        if let Some(out) = self.project.last_export.clone().filter(|p| p.exists()) {
+            match payload::export(&self.project.exam, &self.project.teacher_public, false, self.export_hints(), &out) {
+                Ok(()) => self.toast("Internet link ready. The exam file now includes it.", false),
+                Err(e) => self.toast(format!("Couldn't add the link to the exam file ({e}). Students can type the link instead."), true),
+            }
         }
     }
 
@@ -256,6 +302,7 @@ impl Studio {
             }
         }
         self.tick_regrades();
+        self.tick_link();
         let done: Vec<(String, u32)> = self.review_jobs.keys().cloned().collect();
         for k in done {
             if let Some(rx) = self.review_jobs.get(&k) {
@@ -279,6 +326,8 @@ impl crate::ui::Root for Studio {
         let ctx = &ui.ctx().clone();
         #[cfg(debug_assertions)]
         if crate::ui::shot::enabled() {
+            self.ai.shot();
+            self.updates.shot();
             self.shot_script(ctx);
             crate::ui::shot::tick(ctx);
         }
@@ -318,6 +367,19 @@ impl crate::ui::Root for Studio {
                 self.tour = None;
             }
         }
+        if let Some(qs) = self.ai.show(ctx) {
+            let n = qs.len();
+            for mut q in qs {
+                q.id = self.project.exam.next_question_id();
+                self.exam().questions.push(q);
+            }
+            if n > 0 {
+                self.selected = Some(self.project.exam.questions.len() - n);
+                self.page = Page::Build;
+                self.toast(format!("Added {n} question(s). Read through them before exporting."), false);
+            }
+        }
+        self.updates.show(ctx, self.live.is_some());
         self.draw_toasts(ctx);
         if let Some(c) = &self.guide_caption {
             let p = pal();
@@ -478,6 +540,8 @@ impl Studio {
                 });
                 ui.add_space(40.0);
                 ui.allocate_ui_with_layout(egui::vec2(ui.available_width().min(420.0), 0.0), Layout::top_down(Align::Min), |ui| {
+                    self.ai.card(ui);
+                    ui.add_space(16.0);
                     egui::Frame::new().stroke(Stroke::new(1.0_f32, p.border)).corner_radius(CornerRadius::same(theme::R_PANEL)).inner_margin(Margin::same(20)).show(ui, |ui| {
                         ui.set_width(ui.available_width());
                         ui.label(theme::eyebrow("How a session runs"));
@@ -1149,6 +1213,23 @@ impl Studio {
             self.live_started = Some(Instant::now());
         }
 
+        if let Some(rx) = &self.open_check {
+            if let Ok(r) = rx.try_recv() {
+                self.open_check = None;
+                match (r, &self.live) {
+                    (Ok(pw), Some(live)) => {
+                        live.state.lock().unwrap().open_password = Some(pw);
+                        self.toast("Students can now start without the password.", false);
+                    }
+                    (Err(e), _) => self.toast(e, true),
+                    _ => {}
+                }
+            }
+        }
+        if self.live.is_none() {
+            self.open_check = None;
+        }
+
         let ips = net::local_ipv4_named();
         let Some(live) = &self.live else {
             // Readiness checklist, evaluated live.
@@ -1224,6 +1305,43 @@ impl Studio {
                     }
                 }
             });
+            if http.is_some() {
+                Self::link_row(ui, &mut self.link, &mut self.link_custom, &mut self.toasts);
+            }
+            if !self.project.exam.settings.exam_password.is_empty() {
+                let mut on = live.state.lock().unwrap().open_password.is_some();
+                let checking = self.open_check.is_some();
+                ui.horizontal_wrapped(|ui| {
+                    let r = ui
+                        .add_enabled(!checking, egui::Checkbox::new(&mut on, "Students start without the password"))
+                        .on_hover_text("For this session only: exams that are open and signed out receive the exam password from this PC over the encrypted connection, so students just type their name. Turn it off to require the password again.");
+                    if r.changed() {
+                        if on {
+                            let pw = self.project.exam.settings.exam_password.clone();
+                            let file = self.project.last_export.clone().filter(|p| p.exists());
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            std::thread::spawn(move || {
+                                let r = match file.map(|f| crate::payload::read_file(&f)) {
+                                    Some(Ok(Some(pkg))) if pkg.unlock(&pw).is_err() => Err("The exported exam uses a different password. Export it again, then turn this on.".to_string()),
+                                    _ => Ok(pw),
+                                };
+                                let _ = tx.send(r);
+                            });
+                            self.open_check = Some(rx);
+                        } else {
+                            live.state.lock().unwrap().open_password = None;
+                        }
+                    }
+                    if checking {
+                        ui.add(egui::Spinner::new().size(12.0));
+                        ui.label(theme::muted("Checking the exam file…").size(12.5));
+                    } else if on {
+                        ui.label(RichText::new("On: signed-out exams open without the password").size(12.5).color(p.warning));
+                    } else {
+                        ui.label(theme::muted("Off: students type the exam password").size(12.5));
+                    }
+                });
+            }
             ui.label(theme::muted(format!(
                 "This PC: {}   ·   exam port {port}",
                 ips.iter().map(|(n, ip)| format!("{ip} ({n})")).collect::<Vec<_>>().join(", ")
@@ -1282,6 +1400,14 @@ impl Studio {
                 }
                 if ui.add(egui::Button::new(RichText::new(format!("{}  Close exam on all PCs", icon::CANCEL)).color(p.danger)).fill(theme::clear_fill(ui)).min_size(egui::vec2(0.0, 34.0))).on_hover_text("Submits any exam still in progress and closes the exam on every connected PC").clicked() {
                     self.confirm_close_all = true;
+                }
+                if theme::ghost(ui, &format!("{}  Restart finished PCs", icon::REFRESH)).on_hover_text("Every PC whose student has submitted goes back to the sign-in screen for the next group. Results are kept.").clicked() {
+                    let finished: Vec<String> = students.iter().filter(|s| s.connected && s.submission.is_some()).map(|s| s.attempt_id.clone()).collect();
+                    let n = finished.len();
+                    for id in finished {
+                        send.push((Some(id), S2C::RestartExam));
+                    }
+                    self.toasts.push(Toast { text: if n == 0 { "No connected PC has a submitted exam yet.".into() } else { format!("{n} PC(s) back at sign-in for the next students.") }, at: Instant::now(), error: n == 0 });
                 }
                 if theme::ghost(ui, &format!("{}  +5 min all", icon::CLOCK)).clicked() {
                     send.push((None, S2C::AddTime { secs: 300 }));
@@ -1412,6 +1538,10 @@ impl Studio {
                                 if s.submission.is_none() && ui.add(egui::Button::new(RichText::new("End exam").color(p.danger))).on_hover_text("Submit this student's exam now").clicked() {
                                     send.push((Some(sel.clone()), S2C::ForceSubmit));
                                 }
+                                if s.connected && s.submission.is_some() && ui.add(egui::Button::new(format!("{}  Restart for next student", icon::REFRESH))).on_hover_text("This student has submitted and left: clear the PC back to the sign-in screen for someone else. Their result is kept.").clicked() {
+                                    send.push((Some(sel.clone()), S2C::RestartExam));
+                                    self.toasts.push(Toast { text: format!("{}'s PC is back at sign-in for the next student.", rtl::line(&s.name)), at: Instant::now(), error: false });
+                                }
                                 if s.connected && ui.add(egui::Button::new(RichText::new("Close exam").color(p.danger))).on_hover_text("Submit (if still working) and close the exam on this student's PC").clicked() {
                                     send.push((Some(sel.clone()), S2C::CloseExam));
                                     self.toasts.push(Toast { text: format!("Closing the exam on {}'s PC.", rtl::line(&s.name)), at: Instant::now(), error: false });
@@ -1501,6 +1631,82 @@ impl Studio {
                     Some(id) => st.send(&id, msg),
                     None => st.broadcast(msg),
                 }
+            }
+        }
+    }
+
+    /// "Create internet link" and its progress, inside the session card.
+    fn link_row(ui: &mut egui::Ui, link: &mut Option<crate::link::PublicLink>, custom: &mut Option<String>, toasts: &mut Vec<Toast>) {
+        use crate::link::{LinkState, PublicLink};
+        let p = pal();
+        let state = link.as_ref().map(|l| l.state());
+        ui.horizontal_wrapped(|ui| {
+            match &state {
+                None => {
+                    if custom.is_none() {
+                        if theme::ghost(ui, &format!("{}  Create internet link", icon::NETWORK)).on_hover_text("For students who aren't on this network: a public https link to the download page and the live session, through a free Cloudflare tunnel. Everything stays end-to-end encrypted.").clicked() {
+                            *link = Some(PublicLink::start(net::HTTP_PORT));
+                        }
+                        if ui.add(egui::Button::new(theme::muted("Use my own address").size(12.5)).frame_when_inactive(false)).on_hover_text("You already reach this PC from the internet (public IP with port forwarding to 47880, your own domain or tunnel)").clicked() {
+                            *custom = Some(String::new());
+                        }
+                    }
+                }
+                Some(LinkState::Downloading(f)) => {
+                    ui.spinner();
+                    ui.label(theme::muted(format!("Getting the tunnel tool (one time only)… {:.0}%", f * 100.0)).size(13.0));
+                }
+                Some(LinkState::Starting) => {
+                    ui.spinner();
+                    ui.label(theme::muted("Creating the internet link…").size(13.0));
+                }
+                Some(LinkState::Ready(u)) => {
+                    ui.label(theme::muted("Anywhere on the internet"));
+                    ui.label(RichText::new(u).font(theme::mono(14.0)).color(p.accent));
+                    if theme::icon_button(ui, icon::COPY, "Copy link").clicked() {
+                        ui.ctx().copy_text(u.clone());
+                        toasts.push(Toast { text: "Link copied".into(), at: Instant::now(), error: false });
+                    }
+                    if ui.add(egui::Button::new(theme::muted("Stop link").size(12.5)).frame_when_inactive(false)).on_hover_text("Students joined through the link lose their connection; their work stays saved on their PC").clicked() {
+                        *link = None;
+                    }
+                }
+                Some(LinkState::Failed(e)) => {
+                    ui.label(RichText::new(format!("{}  {e}", icon::WARNING)).size(13.0).color(p.danger));
+                    if theme::ghost(ui, "Try again").clicked() {
+                        *link = Some(PublicLink::start(net::HTTP_PORT));
+                    }
+                    if ui.add(egui::Button::new(theme::muted("Cancel").size(12.5)).frame_when_inactive(false)).clicked() {
+                        *link = None;
+                    }
+                }
+            }
+        });
+        if link.is_none() {
+            let mut done = None;
+            if let Some(addr) = custom.as_mut() {
+                ui.horizontal(|ui| {
+                    theme::text_field(ui, addr, "https://exam.example.com  or  http://203.0.113.5:47880", 380.0);
+                    if theme::ghost(ui, "Use").clicked() {
+                        done = Some(Some(addr.trim().to_string()));
+                    }
+                    if ui.add(egui::Button::new(theme::muted("Cancel").size(12.5)).frame_when_inactive(false)).clicked() {
+                        done = Some(None);
+                    }
+                });
+            }
+            match done {
+                Some(Some(a)) if !a.is_empty() => {
+                    let url = if a.contains("://") { a } else { format!("http://{a}") };
+                    if net::link_reachable(&url) {
+                        *link = Some(PublicLink::custom(url.trim_end_matches('/').to_string()));
+                        *custom = None;
+                    } else {
+                        toasts.push(Toast { at: Instant::now(), error: true, text: "That address doesn't reach this session from here. Check the port forwarding (to port 47880) and try again.".into() });
+                    }
+                }
+                Some(_) => *custom = None,
+                None => {}
             }
         }
     }
@@ -2282,6 +2488,19 @@ impl Studio {
                     st.dirty = true;
                 }
                 self.live_selected = Some(std::env::var("HDJLABS_SHOT_LIVE_SEL").unwrap_or_else(|_| "demo-S-117".into()));
+                let mut server = server;
+                if std::env::var_os("HDJLABS_SHOT_OPEN").is_some() {
+                    server.state.lock().unwrap().open_password = Some(e.settings.exam_password.clone());
+                }
+                if let Ok(l) = std::env::var("HDJLABS_SHOT_LINK") {
+                    server.http_url = Some("http://192.168.1.20:47880/".into());
+                    self.link_in_file = Some("https://maple-river-quiet-lab.trycloudflare.com".into());
+                    match l.as_str() {
+                        "ready" => self.link = Some(crate::link::PublicLink::custom("https://maple-river-quiet-lab.trycloudflare.com".into())),
+                        "custom" => self.link_custom = Some("http://203.0.113.5:47880".into()),
+                        _ => {}
+                    }
+                }
                 self.live = Some(server);
                 self.page = Page::Live;
             }

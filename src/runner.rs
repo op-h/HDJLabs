@@ -309,6 +309,8 @@ fn exec(step: &Step, dir: &Path, stdin: &str, timeout: Duration) -> RunOutput {
     }
 }
 
+pub use sandbox::Job;
+
 #[cfg(windows)]
 mod sandbox {
     use std::os::windows::io::AsRawHandle;
